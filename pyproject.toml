@@ -1,0 +1,35 @@
+[project]
+name = "agents-work"
+version = "0.1.0"
+description = "Five research/ops agents: research briefs, backtests, market briefings, internship scouting, and a personal RAG analyst."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "anthropic>=0.40",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "pyarrow>=15",
+    "yfinance>=0.2.40",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "respx>=0.21"]
+
+[project.scripts]
+agents = "agents_work.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agents_work"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["benchmark: performance/quality gates from BENCHMARKS.md", "live: hits real external services (skipped unless AGENTS_LIVE=1)"]

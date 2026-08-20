@@ -1,0 +1,89 @@
+# Benchmarks
+
+Every gate below is enforced by a test marked `@pytest.mark.benchmark`, so
+"passes the benchmarks" means `pytest -m benchmark` is green, not that someone
+eyeballed the output. Run them with:
+
+```
+./tests/run_all.sh          # everything
+.venv/bin/pytest -m benchmark   # just the gates
+```
+
+Each gate names the failure it exists to prevent. Several of them were written
+*after* the bug they describe was found in this codebase; those are marked
+**(regression)**.
+
+## Cross-cutting
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| X1 | Every agent completes with no network and no LLM | 5/5 produce a non-empty artifact, none raise. The one exception is stated: a backtest with no model has no strategy code, and fails by name rather than inventing one |
+| X2 | A degraded run says so | `degraded: true` in frontmatter **and** a `> Ran degraded` banner **and** the reasons in the run log |
+| X3 | One run, one row | each agent invocation writes exactly one `runs` row, success or failure |
+| X4 | No credential leaks | no rendered brief, run log row or API response contains the LLM key |
+| X5 | Sources are attributed | every brief with data has a Sources section or an explicit degradation saying why not |
+
+## 1 · Research agent
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| R1 | TTM is four **contiguous** quarters | exact match against a hand-computed fixture |
+| R2 | A missing fiscal Q4 is reconstructed from (FY − 9M YTD) **(regression)** | NVDA-shaped facts yield 253.49B, not the 229.43B a gap-jumping scan returns |
+| R3 | A stale tag never wins **(regression)** | given a 2020-vintage tag and a current one, the current one is chosen |
+| R4 | An unfillable gap yields no number | `revenue_ttm is None` plus a note — never a 15-month "TTM" |
+| R5 | Multi-class and stale share counts are refused **(regression)** | Berkshire-shaped facts omit market cap rather than using a 2011 count |
+| R6 | Model figures are checked against the dossier | a fabricated figure is listed under "Unverified figures"; a grounded one is not |
+| R7 | Brief structure | Snapshot, filings table, sources, parseable frontmatter |
+
+## 2 · Backtest agent
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| B1 | The overnight gap belongs to the book, not the entry **(regression)** | on a synthetic series where the gap is predictable from the prior close, a gap-chasing strategy earns **0.0** — the old attribution earned all of it |
+| B2 | Signals cannot act on their own bar | `sign(today's return)` on a random walk yields \|Sharpe\| < 1.0 |
+| B3 | Costs are charged, exactly | net = gross − turnover × (commission + slippage)/1e4, to 1e-12 |
+| B4 | Metrics are correct | Sharpe, CAGR, max drawdown match closed-form values on a constructed series |
+| B5 | Generated code is contained | no network, no filesystem, non-root, memory and wall-clock capped; a network attempt fails inside the sandbox |
+| B6 | Isolation is never overstated | a subprocess fallback run is labelled `isolation: subprocess` in the brief and the metadata |
+| B7 | Broken code is repaired, then given up on | a failing strategy triggers ≤ `max_repairs` regenerations and then reports failure honestly |
+
+## 3 · Market open briefing
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| M1 | Renders with every source dead | futures/macro/watchlist tables present, each cell `n/a`, degradations non-empty |
+| M2 | Non-trading days are labelled | a Saturday brief carries the closed-market note |
+| M3 | Only today's earnings | a symbol reporting tomorrow does not appear |
+| M4 | Movers are ranked by absolute move | −4% outranks +1% |
+| M5 | Instruments are quoted in their own units **(regression)** | a 4.66→4.70 move on the 10y renders `+4bp`, never `+0.86%` — a model read the percent form as 92 basis points |
+
+## 4 · Internship scout
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| S1 | The diff is the product | run 1 surfaces N, an identical run 2 surfaces 0, one added posting surfaces exactly 1 |
+| S2 | The diff is atomic | a batch that fails mid-write leaves no partially-remembered keys |
+| S3 | Identity survives edits | a posting whose title and location change is still not "new" |
+| S4 | Relevance filter | recruiting/sales/legal internships score below threshold; quant/SWE internships above |
+| S5 | A dead board is reported | a board returning nothing appears in Coverage and in the degradations |
+
+## 5 · Personal RAG analyst
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| A1 | Retrieval recall | **recall@5 ≥ 0.9** over a gold set of question→file pairs (currently 10/10) |
+| A2 | Hybrid beats either half | hybrid recall ≥ lexical-only and ≥ semantic-only on the same gold set |
+| A3 | "last month" is a filter, not a hint | an older note that matches more words is excluded from a windowed query |
+| A4 | An empty window is admitted, not silently widened | falling back to the whole index adds a degradation |
+| A5 | Citations are real | every cited path exists in the index |
+| A6 | The index is process-stable **(regression)** | embeddings built in one process match a query embedded in another (crc32, not salted `hash()`) |
+| A7 | Search-only degradation | with no LLM, passages are still returned and labelled search-only |
+
+## 6 · Performance
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| P1 | Index build | ≥ 200 chunks/second |
+| P2 | Query latency | < 150 ms median over the gold set |
+| P3 | Brief render | < 25 ms for a full research brief |
+| P4 | EDGAR requests per ticker | ≤ 3 network fetches for a cold profile+fundamentals (was 9 before companyfacts) |

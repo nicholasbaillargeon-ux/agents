@@ -1,0 +1,198 @@
+"""Research agent: the document, the grounding check, the commit."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+from edgar_facts import NVDA_CORRECT_TTM, nvda_facts
+
+from agents_work.agents import research
+from agents_work.agents.base import Context
+from agents_work.gitsink import NotesRepo
+from agents_work.grounding import ungrounded
+from agents_work.llm import FakeLLM
+
+RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>SPY rallies on soft inflation print</title>
+<link>https://news.example/1</link><source>Example Wire</source>
+<pubDate>{now}</pubDate></item>
+<item><title>Analysts lift targets</title><link>https://news.example/2</link>
+<source>Example Wire</source><pubDate>{now}</pubDate></item>
+</channel></rss>"""
+
+SECTIONS = """## Thesis
+
+Revenue of $253.49B compounding at 70.7% is the whole case, and it holds only if
+datacenter demand outruns the cycle.
+
+## Risks
+
+- A single customer concentration unwinds
+- Margins revert toward 45.0% as competition lands
+
+## Valuation context
+
+At 20.7 times sales the multiple already assumes the growth persists.
+"""
+
+
+@pytest.fixture
+def wired(cfg, fetcher, llm):
+    """A context whose every external source is a fixture."""
+    fetcher.route("company_tickers.json",
+                  {"0": {"cik_str": 1045810, "ticker": "SPY", "title": "NVIDIA CORP"}})
+    fetcher.route("submissions/CIK", {
+        "sicDescription": "Semiconductors", "exchanges": ["Nasdaq"],
+        "filings": {"recent": {
+            "form": ["10-Q", "8-K"],
+            "filingDate": ["2026-05-20", "2026-08-17"],
+            "reportDate": ["2026-04-26", "2026-08-17"],
+            "accessionNumber": ["0001045810-26-000052", "0001045810-26-000069"],
+            "primaryDocument": ["nvda-20260426.htm", "nvda-20260817.htm"],
+            "primaryDocDescription": ["10-Q", "8-K"]}}})
+    fetcher.route("news.google.com",
+                  RSS.format(now=datetime.now(timezone.utc).strftime(
+                      "%a, %d %b %Y %H:%M:%S GMT")))
+    fetcher.route("index.json", {"directory": {"item": []}})
+    ctx = Context(cfg, llm=llm, fetcher=fetcher,
+                  notes=NotesRepo(cfg.notes_repo), offline=True)
+    # companyfacts is large; inject it rather than serialising a fixture file
+    from agents_work.sources.edgar import Edgar
+    original = Edgar.company_facts
+    Edgar.company_facts = lambda self, cik: nvda_facts()
+    yield ctx
+    Edgar.company_facts = original
+    ctx.close()
+
+
+# -- structure ---------------------------------------------------------------
+
+@pytest.mark.benchmark
+def test_brief_has_the_sections_a_reader_expects(wired):
+    """R7."""
+    wired.llm.default_response = SECTIONS
+    brief, data = research.build_brief(wired, "SPY")
+    headings = [s.heading for s in brief.sections]
+    assert "Snapshot" in headings
+    assert "Recent filings" in headings
+    assert "Headlines" in headings
+    assert "Thesis" in headings and "Risks" in headings
+    assert brief.sources
+
+
+def test_snapshot_carries_the_corrected_fundamentals(wired):
+    brief, data = research.build_brief(wired, "SPY")
+    text = brief.render()
+    assert "$253.49B" in text
+    assert data["ps"] and 5 < data["ps"] < 60      # sane, not the 483 the bug gave
+    assert "How the TTM was assembled" in text
+
+
+def test_frontmatter_is_parseable_and_complete(wired):
+    brief, _ = research.build_brief(wired, "SPY")
+    fm = brief.frontmatter().splitlines()
+    keys = {line.split(":")[0] for line in fm if ":" in line}
+    assert {"title", "agent", "target", "date", "generated_at", "cik", "degraded"} <= keys
+
+
+def test_dossier_names_the_revenue_tag(wired):
+    wired.llm.default_response = SECTIONS
+    research.build_brief(wired, "SPY")
+    assert "Revenues" in wired.llm.prompts[0]
+    assert "TTM built from quarters" in wired.llm.prompts[0]
+
+
+# -- grounding ---------------------------------------------------------------
+
+@pytest.mark.benchmark
+def test_fabricated_figures_are_flagged(wired):
+    """R6. 45.0% appears nowhere in the dossier."""
+    wired.llm.default_response = SECTIONS
+    brief, _ = research.build_brief(wired, "SPY")
+    text = brief.render()
+    assert "Unverified figures" in text
+    assert "45.0%" in text.split("Unverified figures")[1]
+
+
+@pytest.mark.benchmark
+def test_grounded_figures_are_not_flagged(wired):
+    """R6."""
+    wired.llm.default_response = (
+        "## Thesis\n\nRevenue of $253.49B is the case.\n\n"
+        "## Risks\n\n- Concentration\n\n## Valuation context\n\nRich.\n")
+    brief, _ = research.build_brief(wired, "SPY")
+    assert "Unverified figures" not in brief.render()
+
+
+def test_grounding_tolerates_rounding_and_units():
+    dossier = "REVENUE TTM: $253,490,000,000 · net margin 0.63 · income 11,729"
+    assert ungrounded("Revenue $253.5B, margin 63%, income $11,729M.", dossier) == []
+
+
+def test_grounding_is_silent_without_facts():
+    assert ungrounded("Revenue was $500B.", "") == []
+
+
+# -- degradation -------------------------------------------------------------
+
+def test_missing_model_leaves_the_data_sections_intact(cfg, wired):
+    wired.llm = FakeLLM(cfg, available=False)
+    brief, _ = research.build_brief(wired, "SPY")
+    text = brief.render()
+    assert "$253.49B" in text
+    assert "Snapshot" in [s.heading for s in brief.sections]
+    assert any("analysis sections omitted" in d for d in brief.degradations)
+    assert "the language model was unavailable" in text
+
+
+def test_model_prose_without_headings_is_kept(wired):
+    wired.llm.default_response = "Just some prose with no headings at all."
+    brief, _ = research.build_brief(wired, "SPY")
+    assert "Analysis" in [s.heading for s in brief.sections]
+    assert "Just some prose" in brief.render()
+
+
+def test_unknown_ticker_degrades_rather_than_crashes(cfg, fetcher, llm):
+    fetcher.route("company_tickers.json", {})
+    ctx = Context(cfg, llm=llm, fetcher=fetcher, notes=NotesRepo(cfg.notes_repo),
+                  offline=True)
+    res = research.run(ctx, "NOTREAL", commit=False)
+    ctx.close()
+    assert res.ok                       # a thin brief is still a brief
+    assert any("not in the SEC ticker file" in d for d in res.degradations)
+
+
+# -- persistence -------------------------------------------------------------
+
+def test_run_commits_to_the_notes_repo(wired, cfg):
+    res = research.run(wired, "SPY", commit=True)
+    assert res.ok
+    assert res.data["commit"]["committed"]
+    assert (cfg.notes_repo / "briefs" / res.artifact.name).is_file()
+    log = NotesRepo(cfg.notes_repo).log()
+    assert any("SPY: research brief" in c["subject"] for c in log)
+
+
+def test_identical_content_does_not_create_an_empty_commit(wired, cfg):
+    repo = NotesRepo(cfg.notes_repo)
+    first = repo.commit_file("briefs/x.md", "same", "first")
+    second = repo.commit_file("briefs/x.md", "same", "second")
+    assert first.committed and not second.committed
+    assert "unchanged" in second.message
+
+
+def test_a_git_failure_never_loses_the_brief(wired, monkeypatch, cfg):
+    from agents_work import gitsink
+    monkeypatch.setattr(gitsink.NotesRepo, "commit_file",
+                        lambda *a, **k: (_ for _ in ()).throw(gitsink.GitError("no repo")))
+    res = research.run(wired, "SPY", commit=True)
+    assert res.ok
+    assert res.artifact.is_file()
+    assert any("could not commit" in d for d in res.degradations)
+
+
+def test_run_watchlist_returns_one_result_per_ticker(wired):
+    results = research.run_watchlist(wired, ["SPY", "SPY"], commit=False)
+    assert len(results) == 2
+    assert all(r.ok for r in results)

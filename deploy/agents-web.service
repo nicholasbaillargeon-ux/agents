@@ -1,0 +1,19 @@
+[Unit]
+Description=agents_work dashboard (read-only view over agent output)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nbaillar
+Group=nbaillar
+WorkingDirectory=/home/nbaillar/agents_work
+ExecStart=/home/nbaillar/agents_work/.venv/bin/uvicorn agents_work.web.app:app \
+          --host 0.0.0.0 --port 8110 --no-access-log
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

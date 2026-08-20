@@ -1,0 +1,12 @@
+[Unit]
+Description=Market open briefing at 08:00 on trading days
+# 08:00 America/New_York (the host's timezone), 90 minutes before the bell.
+
+[Timer]
+OnCalendar=Mon-Fri 08:00
+# A machine that was asleep at 08:00 still gets its briefing on wake.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

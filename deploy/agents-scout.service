@@ -1,0 +1,14 @@
+[Unit]
+Description=agents_work nightly internship scout
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nbaillar
+Group=nbaillar
+WorkingDirectory=/home/nbaillar/agents_work
+ExecStart=/home/nbaillar/agents_work/.venv/bin/agents scout
+SuccessExitStatus=0 1
+TimeoutStartSec=900
+NoNewPrivileges=yes

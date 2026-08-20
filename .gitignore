@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+
+# Everything under data/ is generated: the run log, the HTTP cache, the notes
+# repo (its own git repo), rendered briefs, and the analyst index — which holds
+# the text of the user's notes and must never be committed here.
+data/

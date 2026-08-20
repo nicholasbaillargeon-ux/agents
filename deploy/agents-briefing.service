@@ -1,0 +1,16 @@
+[Unit]
+Description=agents_work market open briefing
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nbaillar
+Group=nbaillar
+WorkingDirectory=/home/nbaillar/agents_work
+ExecStart=/home/nbaillar/agents_work/.venv/bin/agents briefing
+# The brief is the product; a failed run is already recorded in the run log and
+# shown on the dashboard, so systemd does not need to retry into a dead source.
+SuccessExitStatus=0 1
+TimeoutStartSec=600
+NoNewPrivileges=yes
