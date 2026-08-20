@@ -16,9 +16,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GATE = re.compile(r"^\|\s*([XRBMSAP]\d)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$")
+# \d{1,2}, not \d: gate S10 was invisible to this script for one commit,
+# which is precisely the "documented but unchecked" failure it exists to catch.
+GATE = re.compile(r"^\|\s*([XRBMSAP]\d{1,2})\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$")
 SECTION = re.compile(r"^##\s+(.*)$")
-IN_DOC = re.compile(r"\b([XRBMSAP]\d)\b")
+IN_DOC = re.compile(r"\b([XRBMSAP]\d{1,2})\b")
 
 
 def gates() -> dict[str, tuple[str, str, str]]:
