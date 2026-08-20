@@ -11,6 +11,7 @@ import logging
 from datetime import date, datetime, timezone
 
 from ..brief import Brief, table
+from ..grounding import ungrounded
 from ..llm import LLMUnavailable
 from ..sources.news import News
 from ..sources.prices import FUTURES, MACRO, YIELDS, PriceSource
@@ -131,9 +132,16 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     data = {"futures": futures, "macro": macro, "movers": movers,
             "headlines": headlines, "earnings": er_rows, "watchlist": watchlist}
 
-    # Lede first — it is the part read on a phone.
-    lede = _lede(ctx, data)
+    # Lede first — it is the part read on a phone, and the only part of this
+    # brief a model wrote, so it is the only part that can be wrong about a
+    # number the tables got right.
+    lede, unverified = _lede(ctx, data)
     if lede:
+        if unverified:
+            lede += ("\n\n_Not found in this morning's tape or headlines: "
+                     + ", ".join(f"`{x}`" for x in unverified)
+                     + ". The lede is model-written; the tables above are not._")
+            brief.extra_meta["ungrounded_figures"] = len(unverified)
         brief.add("Overnight", lede)
 
     brief.add("Futures", table(["Contract", "Last", "Change", "Note"], _quote_rows(futures)))
@@ -166,9 +174,17 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     return brief, data
 
 
-def _lede(ctx: Context, data: dict) -> str:
+def _lede(ctx: Context, data: dict) -> tuple[str, list[str]]:
+    """(lede, figures it used that its own inputs do not support).
+
+    The lede's evidence is exactly the prompt: the tape and the headline titles.
+    Checking against that surface rather than the tape alone matters — a lede
+    attributing a selloff to "disappointing Walmart earnings" is doing its job
+    when a Reuters headline says so, and flagging it would train the reader to
+    ignore the warning.
+    """
     if not ctx.llm.available:
-        return ""
+        return "", []
     tape = []
     for q in data["futures"] + data["macro"]:
         if q.last is not None and q.prev_close is not None:
@@ -181,10 +197,11 @@ def _lede(ctx: Context, data: dict) -> str:
     heads = "\n".join(f"- {h.title}" for h in data["headlines"][:8])
     prompt = (f"TAPE:\n" + "\n".join(tape) + f"\n\nHEADLINES:\n{heads or '(none retrieved)'}")
     try:
-        return ctx.llm.complete(prompt, system=SYSTEM, max_tokens=300, fast=True)
+        text = ctx.llm.complete(prompt, system=SYSTEM, max_tokens=300, fast=True)
     except LLMUnavailable as e:
         log.warning("lede skipped: %s", e)
-        return ""
+        return "", []
+    return text, ungrounded(text, prompt)
 
 
 def run(ctx: Context, *, watchlist: list[str] | None = None, commit: bool = True,

@@ -73,6 +73,13 @@ subprocess` so nobody mistakes it for the real thing.
 
 **briefing** — every table renders whether or not its source answered; a dead
 source is an `n/a` cell plus a named degradation, never a missing section.
+Instruments are quoted in their own units, because given "US 10y yield: +0.92%"
+a model opened a brief with "yields spiked 92 basis points" — the move was four.
+The lede is the only model-written part of the page, so it is the only part that
+can be wrong about a number the tables got right: its figures are checked
+against the tape *and* the headline titles it was shown, and unsupported ones
+are named beneath it. Checking against the tape alone would flag "disappointing
+Walmart earnings" as invented when a Reuters headline says exactly that.
 
 **scout** — the diff is the product. A scout that re-lists yesterday's ninety
 postings stops being read. The diff runs in one transaction, so a crash cannot

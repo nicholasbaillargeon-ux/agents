@@ -11,6 +11,7 @@ import pytest
 
 from agents_work.agents import briefing
 from agents_work.agents.briefing import build_brief, earnings_today
+from agents_work.sources.news import Headline
 from agents_work.sources.prices import FUTURES, MACRO, PriceSource, Quote
 
 THURSDAY = date(2026, 8, 20)
@@ -185,6 +186,85 @@ def test_change_label_handles_a_dead_quote():
     from agents_work.agents.briefing import change_label
     assert change_label(Quote("^TNX", last=None)) == "n/a"
     assert change_label(Quote("SPY", last=None)) == "n/a"
+
+
+TAPE = {
+    "futures": [Quote("ES=F", last=7667.75, prev_close=7738.9, label="S&P 500 futures")],
+    "macro": [Quote("^TNX", last=4.70, prev_close=4.66, label="US 10y yield"),
+              Quote("^VIX", last=16.01, prev_close=14.89, label="VIX")],
+    "movers": [],
+    "headlines": [Headline("Wall Street sinks as bond yields rise, Walmart results "
+                           "disappoint", "https://e/1", "Reuters", None),
+                  Headline("Crypto Stocks Surge as MSTR Gains Over 10%",
+                           "https://e/2", "Wire", None)],
+}
+
+
+# -- M6: the lede is checked against its own inputs --------------------------
+
+@pytest.mark.benchmark
+def test_a_lede_figure_absent_from_tape_and_headlines_is_flagged(ctx):
+    """M6. The tables are assembled from fetched data and cannot be wrong about a
+    number. The lede is the only model-written part of this brief, so it is the
+    only part that can be."""
+    ctx.llm.default_response = (
+        "Equities fell with the VIX up 7.5%. Breadth was poor, with 68.4% of the "
+        "S&P declining and the 10y at 5.90%.")
+    text, flagged = briefing._lede(ctx, TAPE)
+    assert "7.5%" in text
+    assert flagged == ["68.4%", "5.90%"]
+
+
+@pytest.mark.benchmark
+def test_the_caveat_lands_under_the_lede(ctx, offline_ctx, monkeypatch):
+    """M6: an unverified figure has to be visible next to the sentence using it."""
+    monkeypatch.setattr(briefing, "_lede",
+                        lambda c, d: ("Breadth was poor, 68.4% declining.", ["68.4%"]))
+    brief, _ = build_brief(offline_ctx, today=THURSDAY)
+    text = brief.render()
+    assert "Not found in this morning's tape or headlines: `68.4%`" in text
+    assert text.index("68.4% declining") < text.index("Not found in this morning")
+    assert text.index("Not found in this morning") < text.index("## Futures")
+    assert brief.extra_meta["ungrounded_figures"] == 1
+
+
+@pytest.mark.benchmark
+def test_a_lede_grounded_in_the_headlines_is_not_flagged(ctx):
+    """M6. Attributing a selloff to Walmart is the lede doing its job when a
+    Reuters headline says so; flagging it would train the reader to ignore the
+    warning."""
+    ctx.llm.default_response = (
+        "Equities are selling off, with the VIX up 7.5% and yields 4bp higher, on "
+        "disappointing Walmart results. Crypto is the outlier, MSTR up 10%.")
+    _, flagged = briefing._lede(ctx, TAPE)
+    assert flagged == [], f"false positives: {flagged}"
+
+
+@pytest.mark.benchmark
+def test_the_lede_check_uses_the_headlines_not_just_the_tape(ctx):
+    """M6: a figure that appears only in a headline is grounded."""
+    ctx.llm.default_response = "MSTR gained 10.0% overnight."
+    _, flagged = briefing._lede(ctx, TAPE)
+    assert flagged == []
+    ctx.llm.default_response = "MSTR gained 33.7% overnight."
+    _, flagged = briefing._lede(ctx, TAPE)
+    assert flagged == ["33.7%"]
+
+
+def test_no_model_means_no_lede_and_no_caveat(offline_ctx):
+    text, flagged = briefing._lede(offline_ctx, TAPE)
+    assert text == "" and flagged == []
+    brief, _ = build_brief(offline_ctx, today=THURSDAY)
+    assert "Not found in this morning's tape" not in brief.render()
+    assert "ungrounded_figures" not in brief.extra_meta
+
+
+def test_a_clean_lede_adds_no_metadata_noise(offline_ctx, monkeypatch):
+    monkeypatch.setattr(briefing, "_lede",
+                        lambda c, d: ("Futures are lower. Nothing explains it.", []))
+    brief, _ = build_brief(offline_ctx, today=THURSDAY)
+    assert "ungrounded_figures" not in brief.extra_meta
+    assert "Not found in this morning" not in brief.render()
 
 
 def test_the_lede_prompt_carries_levels_and_units(ctx):

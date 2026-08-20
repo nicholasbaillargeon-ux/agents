@@ -57,6 +57,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | M3 | Only today's earnings | a symbol reporting tomorrow does not appear |
 | M4 | Movers are ranked by absolute move | −4% outranks +1% |
 | M5 | Instruments are quoted in their own units **(regression)** | a 4.66→4.70 move on the 10y renders `+4bp`, never `+0.86%` — a model read the percent form as 92 basis points |
+| M6 | The lede is checked against its own inputs | figures the lede uses that appear in neither the tape nor the headline titles are named under it; ones drawn from a headline are not, or the warning becomes noise |
 
 ## 4 · Internship scout
 
