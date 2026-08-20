@@ -15,12 +15,10 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from pathlib import Path
-
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
 from ..sources.jobs import REGISTRY, Boards, Posting, posting_key, score
-from ..store import Run, mark_new, record, seen_count, unseen_keys
+from ..store import Run, mark_new, record, seen_count, seen_since, unseen_keys
 from .base import AgentResult, Context
 
 log = logging.getLogger(__name__)
@@ -117,19 +115,20 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     fresh = unseen_keys(ctx.db, NAME, list(by_key))
     new_postings = [by_key[k] for k in fresh[:limit]]
     backlog = len(fresh) - len(new_postings)
-    mark_new(ctx.db, NAME, {p.key: p.as_dict() for p in new_postings})
 
-    # Rank exactly what will be displayed. These two limits used to disagree —
-    # the brief showed 25 rows and asked the model about 20 — so five rows
-    # carried a dash while the summary said verdicts were model-assigned.
+    # Rank before claiming, so the verdict is stored alongside the posting and a
+    # later run of the same day can render it without asking the model again.
     verdicts = rank(ctx, new_postings, limit=len(new_postings)) if use_llm else {}
     if new_postings:
         new_postings.sort(key=lambda p: (
             VERDICT_ORDER.get(verdicts.get(p.key, {}).get("verdict", ""), 2), -p.score))
+    mark_new(ctx.db, NAME, {p.key: {**p.as_dict(), **verdicts.get(p.key, {})}
+                            for p in new_postings})
 
     today = datetime.now(timezone.utc).date()
-    brief = Brief(title=f"Internship scout — {len(new_postings)} new "
-                        f"{'match' if len(new_postings) == 1 else 'matches'}",
+    surfaced = seen_since(ctx.db, NAME, _start_of_day(today))
+    brief = Brief(title=f"Internship scout — {len(surfaced)} "
+                        f"{'match' if len(surfaced) == 1 else 'matches'} today",
                   agent=NAME, target=f"scout-{today.isoformat()}",
                   tags=["internships", "search"])
     for d in ctx.base_degradations():
@@ -139,20 +138,24 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     if dead:
         brief.degrade(f"{len(dead)} board(s) returned nothing: {', '.join(sorted(dead))}")
 
-    if new_postings:
-        rows = []
-        for p in new_postings:
-            v = verdicts.get(p.key, {})
-            rows.append([
-                p.company, f"[{p.title}]({p.url})", p.location or "—",
-                p.score, (v.get("verdict") or "—"), v.get("why", ""),
-            ])
-        brief.add("New since last run",
+    # The digest covers the whole day, not this run. A second run of the same
+    # day used to overwrite the morning's findings with its own smaller list --
+    # first when it found nothing, then, once that was guarded, when it found
+    # the 29 postings the display cap had queued and replaced 100 rows with 29.
+    # Rendering the union makes the file monotonic within a day and removes the
+    # special case rather than guarding it.
+    if surfaced:
+        rows = [[p.get("company", ""),
+                 f"[{p.get('title', '')}]({p.get('url', '')})",
+                 p.get("location") or "—", p.get("score", 0),
+                 p.get("verdict") or "—", p.get("why", "")]
+                for p in surfaced]
+        brief.add(f"Surfaced today ({len(rows)})",
                   table(["Company", "Role", "Location", "Score", "Verdict", "Why"], rows))
     else:
-        brief.add("New since last run",
+        brief.add("Surfaced today",
                   "_Nothing new. Every qualifying posting on these boards was already "
-                  "surfaced in an earlier run._")
+                  "surfaced before today._")
 
     brief.add("Coverage", table(
         ["Company", "Sector", "Result"],
@@ -180,36 +183,25 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
         f"- {len(all_postings)} postings pulled from {len(registry)} boards\n"
         f"- {len(candidates)} passed the keyword filter "
         f"(score ≥ {min_score}{', internship titles only' if internships_only else ''})\n"
-        f"- {len(new_postings)} shown as new"
+        f"- {len(new_postings)} shown as new this run "
+        f"({len(surfaced)} surfaced today in total)"
         + (f", {backlog} more queued for the next run (capped at {limit} a night)"
            if backlog else "")
         + f"; {seen_count(ctx.db, NAME)} postings tracked in total\n"
         f"- {verdict_note.capitalize()}; scores are deterministic keyword weights."))
     brief.source("Greenhouse / Lever / Ashby public job board APIs",
                  note="each board's own feed, no scraping")
-    brief.extra_meta.update({"new": len(new_postings), "scanned": len(all_postings),
+    brief.extra_meta.update({"new": len(new_postings), "today": len(surfaced),
+                             "scanned": len(all_postings),
                              "candidates": len(candidates), "backlog": backlog})
     data = {"all": all_postings, "candidates": candidates, "new": new_postings,
-            "verdicts": verdicts, "status": boards.source_status, "backlog": backlog}
+            "verdicts": verdicts, "status": boards.source_status, "backlog": backlog,
+            "surfaced_today": surfaced}
     return brief, data
 
 
-_FRONTMATTER_NEW = re.compile(r"^new:\s*(\d+)\s*$", re.M)
-
-
-def existing_match_count(path: Path) -> int:
-    """How many new postings the brief already at `path` lists, or 0.
-
-    A day's brief is named for the day, so a second run overwrites the first.
-    That is right when the second run found more and wrong when it found
-    nothing: the run that surfaced 104 roles was replaced by one that surfaced
-    none, and the day's actual findings survived only in the git history.
-    """
-    try:
-        match = _FRONTMATTER_NEW.search(path.read_text()[:600])
-    except OSError:
-        return 0
-    return int(match.group(1)) if match else 0
+def _start_of_day(day) -> float:
+    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp()
 
 
 def run(ctx: Context, *, commit: bool = True, **kw) -> AgentResult:
@@ -228,29 +220,21 @@ def run(ctx: Context, *, commit: bool = True, **kw) -> AgentResult:
     res.degradations = list(brief.degradations)
     res.data = {"new": [p.as_dict() for p in data["new"]],
                 "scanned": len(data["all"]), "status": data["status"]}
-    target = ctx.cfg.out_dir / NAME / brief.filename
-    already = existing_match_count(target)
-    superseded = not data["new"] and already
-
-    if superseded:
-        # Keep the day's findings. The run is still logged and still visible on
-        # the dashboard; it simply has nothing to add to the digest.
-        res.artifact = target
-        res.summary = (f"nothing new; kept the earlier brief listing {already} "
-                       f"match{'' if already == 1 else 'es'}")
-        res.data["superseded"] = False
-        res.data["kept_existing"] = already
-    else:
-        res.artifact = brief.write(ctx.cfg.out_dir / NAME)
-        if commit:
-            try:
-                cr = ctx.notes.commit_file(f"scout/{brief.filename}", brief.render(),
-                                           f"scout: {len(data['new'])} new {brief.date}")
-                res.data["commit"] = {"sha": cr.sha, "committed": cr.committed}
-            except Exception as e:  # noqa: BLE001
-                res.degrade(f"could not commit scout report: {e}")
-        res.summary = (f"{len(data['new'])} new of {len(data['candidates'])} qualifying, "
-                       f"{len(data['all'])} scanned")
+    # No guard against overwriting: the digest is the day's union, so a run that
+    # adds nothing renders the same rows and a run that adds something renders
+    # more. It can only grow within a day.
+    res.artifact = brief.write(ctx.cfg.out_dir / NAME)
+    if commit:
+        try:
+            cr = ctx.notes.commit_file(
+                f"scout/{brief.filename}", brief.render(),
+                f"scout: {len(data['new'])} new, {len(data['surfaced_today'])} today "
+                f"{brief.date}")
+            res.data["commit"] = {"sha": cr.sha, "committed": cr.committed}
+        except Exception as e:  # noqa: BLE001
+            res.degrade(f"could not commit scout report: {e}")
+    res.summary = (f"{len(data['new'])} new of {len(data['candidates'])} qualifying, "
+                   f"{len(data['surfaced_today'])} today, {len(data['all'])} scanned")
     record(ctx.db, Run(agent=NAME, target=res.target, ok=True, artifact=str(res.artifact),
                        summary=res.summary, degradations=res.degradations,
                        started_at=started.timestamp(),

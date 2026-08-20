@@ -86,8 +86,11 @@ def test_first_run_surfaces_everything_second_run_surfaces_nothing(ctx, fetcher)
     assert len(data1["new"]) == 3
 
     brief2, data2 = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
-    assert data2["new"] == []
-    assert "Nothing new" in brief2.render()
+    assert data2["new"] == [], "run 2 must find nothing new"
+    # The digest is the day's union, so it still lists what run 1 surfaced. That
+    # is the point: re-running must not empty the morning's brief.
+    assert len(data2["surfaced_today"]) == 3
+    assert "QuantCo" in brief2.render()
 
 
 @pytest.mark.benchmark
@@ -459,54 +462,54 @@ def test_the_default_display_cap_is_generous():
     assert scout.DISPLAY_LIMIT >= 100
 
 
-# -- S11: an empty run does not destroy the day's findings -------------------
+# -- S11: the day's digest only grows -----------------------------------------
 
 @pytest.mark.benchmark
-def test_an_empty_run_keeps_the_days_brief(ctx, fetcher):
+def test_a_second_run_does_not_shrink_the_days_digest(ctx, fetcher):
     """S11 (regression). A day's brief is named for the day, so a second run
-    overwrites the first. The run that surfaced 104 roles was replaced by one
-    that surfaced none, and the findings survived only in the git history —
-    where the analyst, which indexes the working tree, cannot see them."""
-    wire(fetcher)
-    first = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
-    assert "3 new" in first.summary
-    kept = first.artifact.read_text()
-    assert "QuantCo" in kept
+    overwrites the first. The run that surfaced 104 roles was replaced first by
+    one that surfaced none, then -- once that was guarded -- by one that
+    surfaced the 29 the display cap had queued, turning 100 rows into 29. The
+    digest is the day's union now, so it cannot shrink."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+        for i in range(10)]})
 
-    second = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
-    assert second.ok
-    assert second.artifact == first.artifact
-    assert second.artifact.read_text() == kept, "the day's findings were overwritten"
-    assert "kept the earlier brief listing 3 matches" in second.summary
-    assert second.data["kept_existing"] == 3
+    first = scout.run(ctx, registry=REGISTRY[:1], limit=6, use_llm=False, commit=False)
+    assert "6 new" in first.summary
+    assert first.artifact.read_text().count("Quantitative Trading Intern") == 6
+
+    # the queued four arrive next run and are added, not substituted
+    second = scout.run(ctx, registry=REGISTRY[:1], limit=6, use_llm=False, commit=False)
+    text = second.artifact.read_text()
+    assert "4 new" in second.summary and "10 today" in second.summary
+    assert text.count("Quantitative Trading Intern") == 10
+    assert "Surfaced today (10)" in text
+
+    # and a run with nothing new leaves all ten in place
+    third = scout.run(ctx, registry=REGISTRY[:1], limit=6, use_llm=False, commit=False)
+    assert "0 new" in third.summary
+    assert third.artifact.read_text().count("Quantitative Trading Intern") == 10
 
 
 @pytest.mark.benchmark
-def test_a_run_with_more_matches_does_replace(ctx, fetcher):
-    """S11: the guard protects findings, it does not freeze the file."""
+def test_a_verdict_survives_into_a_later_run(ctx, fetcher):
+    """S11: verdicts are stored with the posting, so the day's digest keeps them
+    without paying the model again for rows it already judged."""
     wire(fetcher)
-    scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
-    wire(fetcher, gh=("Quantitative Trading Intern - Summer 2027",
-                      "Quantitative Research Intern - Summer 2027"))
-    third = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
-    assert "1 new" in third.summary
-    assert "Quantitative Research Intern" in third.artifact.read_text()
+    ctx.llm.default_response = (
+        '[{"url": "https://jobs.ashbyhq.com/aico/1", "verdict": "apply",'
+        ' "why": "direct fit"}]')
+    scout.run(ctx, registry=REGISTRY, use_llm=True, commit=False)
+
+    ctx.llm.default_response = "[]"
+    second = scout.run(ctx, registry=REGISTRY, use_llm=True, commit=False)
+    assert second.data["new"] == []
+    assert "direct fit" in second.artifact.read_text()
 
 
-def test_an_empty_run_on_an_empty_day_still_writes(ctx, fetcher):
-    """Nothing to protect: the first brief of the day must be written even when
-    it lists nothing, or there is no digest at all."""
+def test_an_empty_first_run_of_the_day_still_writes(ctx, fetcher):
     res = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
     assert res.artifact.is_file()
-    assert "0 new" in res.summary
     assert "Nothing new" in res.artifact.read_text()
-
-
-def test_existing_match_count_reads_the_frontmatter(tmp_path):
-    from agents_work.agents.scout import existing_match_count
-    p = tmp_path / "s.md"
-    p.write_text("---\ntitle: Internship scout\nnew: 104\nscanned: 4057\n---\n\n# x\n")
-    assert existing_match_count(p) == 104
-    p.write_text("---\ntitle: x\n---\n")
-    assert existing_match_count(p) == 0
-    assert existing_match_count(tmp_path / "missing.md") == 0

@@ -123,6 +123,28 @@ def unseen_keys(conn: sqlite3.Connection, agent: str, keys: list[str]) -> list[s
     return [k for k in keys if k not in known]
 
 
+def seen_since(conn: sqlite3.Connection, agent: str, since: float) -> list[dict]:
+    """Everything this agent first saw at or after `since`, newest first.
+
+    The scout's brief is a day's digest, so it is rendered from this rather than
+    from one run's delta: a second run of the same day would otherwise replace
+    the morning's findings with its own smaller list.
+    """
+    rows = conn.execute(
+        "SELECT key, first_seen, payload FROM seen WHERE agent = ? AND first_seen >= ?"
+        " ORDER BY first_seen DESC", (agent, since)).fetchall()
+    out = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        payload["key"] = row["key"]
+        payload["first_seen"] = row["first_seen"]
+        out.append(payload)
+    return out
+
+
 def seen_count(conn: sqlite3.Connection, agent: str) -> int:
     return conn.execute("SELECT COUNT(*) FROM seen WHERE agent = ?", (agent,)).fetchone()[0]
 
