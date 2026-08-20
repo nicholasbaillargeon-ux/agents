@@ -12,7 +12,10 @@ silently drop those postings out of tomorrow's list too.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
+
+from pathlib import Path
 
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
@@ -191,6 +194,24 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     return brief, data
 
 
+_FRONTMATTER_NEW = re.compile(r"^new:\s*(\d+)\s*$", re.M)
+
+
+def existing_match_count(path: Path) -> int:
+    """How many new postings the brief already at `path` lists, or 0.
+
+    A day's brief is named for the day, so a second run overwrites the first.
+    That is right when the second run found more and wrong when it found
+    nothing: the run that surfaced 104 roles was replaced by one that surfaced
+    none, and the day's actual findings survived only in the git history.
+    """
+    try:
+        match = _FRONTMATTER_NEW.search(path.read_text()[:600])
+    except OSError:
+        return 0
+    return int(match.group(1)) if match else 0
+
+
 def run(ctx: Context, *, commit: bool = True, **kw) -> AgentResult:
     started = datetime.now(timezone.utc)
     res = AgentResult(agent=NAME, target="boards")
@@ -207,17 +228,29 @@ def run(ctx: Context, *, commit: bool = True, **kw) -> AgentResult:
     res.degradations = list(brief.degradations)
     res.data = {"new": [p.as_dict() for p in data["new"]],
                 "scanned": len(data["all"]), "status": data["status"]}
-    res.artifact = brief.write(ctx.cfg.out_dir / NAME)
-    if commit:
-        try:
-            cr = ctx.notes.commit_file(f"scout/{brief.filename}", brief.render(),
-                                       f"scout: {len(data['new'])} new {brief.date}")
-            res.data["commit"] = {"sha": cr.sha, "committed": cr.committed}
-        except Exception as e:  # noqa: BLE001
-            res.degrade(f"could not commit scout report: {e}")
+    target = ctx.cfg.out_dir / NAME / brief.filename
+    already = existing_match_count(target)
+    superseded = not data["new"] and already
 
-    res.summary = (f"{len(data['new'])} new of {len(data['candidates'])} qualifying, "
-                   f"{len(data['all'])} scanned")
+    if superseded:
+        # Keep the day's findings. The run is still logged and still visible on
+        # the dashboard; it simply has nothing to add to the digest.
+        res.artifact = target
+        res.summary = (f"nothing new; kept the earlier brief listing {already} "
+                       f"match{'' if already == 1 else 'es'}")
+        res.data["superseded"] = False
+        res.data["kept_existing"] = already
+    else:
+        res.artifact = brief.write(ctx.cfg.out_dir / NAME)
+        if commit:
+            try:
+                cr = ctx.notes.commit_file(f"scout/{brief.filename}", brief.render(),
+                                           f"scout: {len(data['new'])} new {brief.date}")
+                res.data["commit"] = {"sha": cr.sha, "committed": cr.committed}
+            except Exception as e:  # noqa: BLE001
+                res.degrade(f"could not commit scout report: {e}")
+        res.summary = (f"{len(data['new'])} new of {len(data['candidates'])} qualifying, "
+                       f"{len(data['all'])} scanned")
     record(ctx.db, Run(agent=NAME, target=res.target, ok=True, artifact=str(res.artifact),
                        summary=res.summary, degradations=res.degradations,
                        started_at=started.timestamp(),

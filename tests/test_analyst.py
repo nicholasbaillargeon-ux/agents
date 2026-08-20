@@ -273,11 +273,20 @@ def test_spread_prefers_breadth_then_score():
     assert [h.score for h in got] == sorted((h.score for h in got), reverse=True)
 
 
-def test_spread_respects_the_per_file_cap():
+def test_the_per_file_cap_applies_to_breadth_not_depth():
+    """The cap decides who gets a turn first, not how deep a single document may
+    go once everyone has had one. Capping the depth pass too meant a question
+    about a document that *is* a long list could never retrieve more than two
+    slices of it, however many slots existed."""
     from agents_work.agents.analyst import _spread
-    hits = [Hit("a.md", str(i), "c", "", 1.0 - i / 10) for i in range(6)]
-    assert len(_spread(hits, 4, per_file=2)) == 4      # falls back when documents run out
-    assert len({id(h) for h in _spread(hits, 4, per_file=2)}) == 4
+    hits = ([Hit("a.md", str(i), "c", "", 1.0 - i / 100) for i in range(6)]
+            + [Hit("b.md", "b1", "c", "", 0.5)])
+    got = _spread(hits, 5, per_file=2)
+    assert len(got) == 5
+    assert len({id(h) for h in got}) == 5
+    assert sum(1 for h in got if h.path == "a.md") == 4, (
+        "the long document should fill the slots left after breadth")
+    assert "b.md" in {h.path for h in got}, "breadth still guarantees the other document"
 
 
 def test_spread_handles_degenerate_inputs():

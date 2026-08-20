@@ -262,7 +262,8 @@ class Index:
         """Hybrid BM25 + cosine, spread across documents.
 
         `alpha` weights lexical against semantic. `per_file` caps how many
-        chunks one document may contribute before others get a turn.
+        chunks one document may contribute *before every document has had a
+        turn*; once breadth is satisfied the remaining slots follow score.
 
         Breadth matters more than it looks. Asked to compare seven research
         briefs, pure score order returned two chunks of the same brief and a
@@ -337,11 +338,17 @@ def _spread(hits: list[Hit], k: int, per_file: int) -> list[Hit]:
     # The length check comes before the append, not after: breaking out of the
     # breadth pass at exactly k slots used to fall through to here and return
     # k + 1 passages.
+    # The depth pass follows score without a per-document cap. Breadth is
+    # already guaranteed by the pass above, and capping here means no document
+    # can ever contribute more than `per_file` passages however many slots
+    # exist — which makes a question about a document that *is* a long list
+    # unanswerable: the scout's 106-row table is fourteen chunks, and two of
+    # them is not an answer to "what did it find".
     counts = Counter(h.path for h in chosen)
     for i, hit in enumerate(hits):
         if len(chosen) >= k:
             break
-        if i in taken or counts[hit.path] >= per_file:
+        if i in taken:
             continue
         chosen.append(hit)
         counts[hit.path] += 1

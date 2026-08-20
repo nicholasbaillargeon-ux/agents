@@ -74,6 +74,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | S7 | Identity in the query string is preserved **(regression)** | six firms point every posting at one careers page and differ only by `gh_jid`/`id`/`token`; stripping the query collapsed 107 Jump Trading roles to one key. Tracking params are dropped, identifying ones kept, and an unresolvable verdict url is dropped rather than attached to the wrong row |
 | S8 | Nothing is claimed that is not shown **(regression)** | with more qualifying postings than the display cap, only the shown ones are marked seen and the brief states how many are queued |
 | S9 | Every displayed row is ranked **(regression)** | the ranking cap matches the display cap, and a genuinely partial answer says "for N of M rows" rather than leaving silent dashes |
+| S11 | An empty run does not destroy the day's findings **(regression)** | a second run of the same day that surfaces nothing keeps the earlier brief; the run that surfaced 104 roles was replaced by one that surfaced none, leaving them only in git where the analyst cannot see them |
 | S10 | Ranking batches | 60 postings produce 3 model calls and 60 verdicts; one unusable batch costs only its own 25. A single completion for a hundred verdicts truncates mid-array and parses as nothing, so a raised cap would cost *every* verdict |
 
 ## 5 · Personal RAG analyst
@@ -87,7 +88,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | A5 | Citations are real | every cited path exists in the index |
 | A6 | The index is process-stable **(regression)** | embeddings built in one process match a query embedded in another (crc32, not salted `hash()`) |
 | A7 | Search-only degradation | with no LLM, passages are still returned and labelled search-only |
-| A8 | Retrieval balances breadth and depth **(regression)** | a cross-document question gets one passage from each of `k - k/4` documents before any gets a second; a single-document question still gets several passages of it. `_spread` never returns more than k |
+| A8 | Retrieval balances breadth and depth **(regression)** | a cross-document question gets one passage from each of `k - k/4` documents before any gets a second; the remaining slots then follow score with no per-document cap, so a question about a document that *is* a long list can retrieve several slices of it. `_spread` never returns more than k |
 | A9 | Hyphenated compounds match their parts **(regression)** | "moving-average crossover" shared no token with a brief describing a "20-day moving average", so the retriever returned that backtest's cost table instead of its strategy |
 
 ## 6 · Performance

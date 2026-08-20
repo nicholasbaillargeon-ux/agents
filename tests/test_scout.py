@@ -457,3 +457,56 @@ def test_the_display_cap_is_reachable_from_the_cli(ctx, fetcher, monkeypatch, cf
 
 def test_the_default_display_cap_is_generous():
     assert scout.DISPLAY_LIMIT >= 100
+
+
+# -- S11: an empty run does not destroy the day's findings -------------------
+
+@pytest.mark.benchmark
+def test_an_empty_run_keeps_the_days_brief(ctx, fetcher):
+    """S11 (regression). A day's brief is named for the day, so a second run
+    overwrites the first. The run that surfaced 104 roles was replaced by one
+    that surfaced none, and the findings survived only in the git history —
+    where the analyst, which indexes the working tree, cannot see them."""
+    wire(fetcher)
+    first = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
+    assert "3 new" in first.summary
+    kept = first.artifact.read_text()
+    assert "QuantCo" in kept
+
+    second = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
+    assert second.ok
+    assert second.artifact == first.artifact
+    assert second.artifact.read_text() == kept, "the day's findings were overwritten"
+    assert "kept the earlier brief listing 3 matches" in second.summary
+    assert second.data["kept_existing"] == 3
+
+
+@pytest.mark.benchmark
+def test_a_run_with_more_matches_does_replace(ctx, fetcher):
+    """S11: the guard protects findings, it does not freeze the file."""
+    wire(fetcher)
+    scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
+    wire(fetcher, gh=("Quantitative Trading Intern - Summer 2027",
+                      "Quantitative Research Intern - Summer 2027"))
+    third = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
+    assert "1 new" in third.summary
+    assert "Quantitative Research Intern" in third.artifact.read_text()
+
+
+def test_an_empty_run_on_an_empty_day_still_writes(ctx, fetcher):
+    """Nothing to protect: the first brief of the day must be written even when
+    it lists nothing, or there is no digest at all."""
+    res = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
+    assert res.artifact.is_file()
+    assert "0 new" in res.summary
+    assert "Nothing new" in res.artifact.read_text()
+
+
+def test_existing_match_count_reads_the_frontmatter(tmp_path):
+    from agents_work.agents.scout import existing_match_count
+    p = tmp_path / "s.md"
+    p.write_text("---\ntitle: Internship scout\nnew: 104\nscanned: 4057\n---\n\n# x\n")
+    assert existing_match_count(p) == 104
+    p.write_text("---\ntitle: x\n---\n")
+    assert existing_match_count(p) == 0
+    assert existing_match_count(tmp_path / "missing.md") == 0
