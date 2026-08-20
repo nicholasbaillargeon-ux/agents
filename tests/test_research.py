@@ -8,6 +8,7 @@ import pytest
 from edgar_facts import NVDA_CORRECT_TTM, nvda_facts
 
 from agents_work.agents import research
+from agents_work.agents.research import EXPECTED_SECTIONS as EXPECTED
 from agents_work.agents.base import Context
 from agents_work.gitsink import NotesRepo
 from agents_work.grounding import ungrounded
@@ -303,3 +304,41 @@ def test_unheaded_prose_is_not_treated_as_missing_sections(wired):
     brief, _ = research.build_brief(wired, "SPY")
     assert "Analysis" in [s.heading for s in brief.sections]
     assert not any("analysis incomplete" in d for d in brief.degradations)
+
+
+@pytest.mark.benchmark
+def test_a_truncated_reply_is_retried_once_with_more_room(wired, cfg):
+    """R9. The endpoint's thinking block counts against max_tokens and its length
+    varies run to run, so the same ticker fits one morning and not the next."""
+    from agents_work.agents.research import SECTION_TOKENS
+
+    class Truncating(FakeLLM):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.budgets = []
+
+        def complete(self, prompt, **kw):
+            self.budgets.append(kw.get("max_tokens"))
+            self.last_stop_reason = "max_tokens" if len(self.budgets) == 1 else "end_turn"
+            return ("## Thesis\n\nCut off." if len(self.budgets) == 1 else SECTIONS)
+
+    wired.llm = Truncating(cfg)
+    brief, _ = research.build_brief(wired, "SPY")
+    assert wired.llm.budgets == [SECTION_TOKENS, SECTION_TOKENS * 2]
+    assert [s.heading for s in brief.sections if s.heading in EXPECTED] == list(EXPECTED)
+    assert not any("analysis incomplete" in d for d in brief.degradations)
+
+
+@pytest.mark.benchmark
+def test_a_second_truncation_is_reported_not_retried_forever(wired, cfg):
+    """R9: one retry, then say so."""
+    class AlwaysTruncating(FakeLLM):
+        def complete(self, prompt, **kw):
+            self.prompts.append(prompt)
+            self.last_stop_reason = "max_tokens"
+            return "## Thesis\n\nStill cut off."
+
+    wired.llm = AlwaysTruncating(cfg)
+    brief, _ = research.build_brief(wired, "SPY")
+    assert len(wired.llm.prompts) == 2
+    assert any("cut off at the token limit" in d for d in brief.degradations)

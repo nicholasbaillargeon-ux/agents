@@ -146,6 +146,13 @@ def _dossier(d: dict) -> str:
 # is a brief whose reader does not know a section was requested and lost.
 EXPECTED_SECTIONS = ("Thesis", "Risks", "Valuation context")
 
+# The visible answer is about 1,000 tokens. The budget is eight times that
+# because the endpoint returns a thinking block alongside the text and it counts
+# against the same cap: a measured MSFT run spent 2,527 output tokens to show
+# 1,224 tokens of prose. Sizing this to the prose alone truncated the last
+# section, and the reader saw a brief that looked finished.
+SECTION_TOKENS = 8000
+
 
 def _write_sections(ctx: Context, d: dict, brief: Brief) -> None:
     dossier = _dossier(d)
@@ -163,7 +170,12 @@ def _write_sections(ctx: Context, d: dict, brief: Brief) -> None:
         "and why it matters. Do not compare to peers — you have no peer data."
     )
     try:
-        text = ctx.llm.complete(prompt, system=SYSTEM, max_tokens=4000)
+        text = ctx.llm.complete(prompt, system=SYSTEM, max_tokens=SECTION_TOKENS)
+        if getattr(ctx.llm, "last_stop_reason", None) == "max_tokens":
+            # One retry with room to spare. Thinking length varies run to run, so
+            # the same ticker can fit one morning and not the next.
+            log.info("section reply truncated; retrying with a larger budget")
+            text = ctx.llm.complete(prompt, system=SYSTEM, max_tokens=SECTION_TOKENS * 2)
     except LLMUnavailable as e:
         brief.degrade(f"analysis sections omitted ({e})")
         brief.add("Thesis", "_Not written — the language model was unavailable for this run. "
