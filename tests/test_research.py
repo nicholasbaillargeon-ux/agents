@@ -251,3 +251,18 @@ def test_every_performance_figure_the_model_sees_is_on_the_page(wired):
         assert f"{value:+.1f}" in snapshot or f"{value:.1f}" in snapshot, (
             f"{key} ({value:.1f}) is in the dossier but not the Snapshot table")
         assert f"{value:.1f}" in dossier or f"{value:+.1f}" in dossier
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("prose,dossier,expected,why", [
+    ("70%+ revenue growth", "REVENUE growth YoY +70.7%", [], "a true lower bound"),
+    ("about $250B of revenue", "REVENUE TTM: $253.49B", [], "the same number said out loud"),
+    ("roughly 63% net margin", "NET MARGIN: 63.0%", [], "exact, stated coarsely"),
+    ("gross margin was 74.2%", "NET MARGIN: 63.0%", ["74.2%"], "ten bands away"),
+    ("a $500B backlog", "REVENUE TTM: $253.49B", ["$500B"], "sixty bands away"),
+    ("the 10y sits at 4.7%", "PRICE: last 82.34, 1y +1.4%", ["4.7%"], "imported figure"),
+])
+def test_prose_restates_rather_than_transcribes(prose, dossier, expected, why):
+    """R6: a brief that rounds for readability is not a brief that invented a
+    number, and the check has to tell those apart to be worth reading."""
+    assert ungrounded(prose, dossier) == expected, why

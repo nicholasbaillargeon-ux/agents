@@ -72,7 +72,14 @@ def _grounded(value: float, places: int, scale: float, facts: list[float]) -> bo
     "sits 0.9% off its 52-week high" is the correct rendering of a -0.9 dossier
     figure, and flagging it fires the warning on almost every brief written.
     """
-    tolerance = max(scale * 10.0 ** (-places) / 2.0, abs(value) * 1e-9)
+    # Two tolerances, whichever is wider. The first is the precision the figure
+    # was written to: "$253.5B" is precise to a tenth of a billion. The second is
+    # a relative band, because prose restates rather than transcribes -- "70%+
+    # growth" of a 70.7% figure is a true statement, and "about $250B" of
+    # $253.49B is the same number said out loud. The band stays narrow enough to
+    # catch what matters: an invented 74.2% against a real 63.0% is ten bands
+    # away, and a $500B backlog against $253B revenue is sixty.
+    tolerance = max(scale * 10.0 ** (-places) / 2.0, abs(value) * RELATIVE_BAND)
     target = abs(value)
     for fact in facts:
         for multiplier in _UNIT_MULTIPLIERS:
@@ -88,6 +95,9 @@ def _grounded(value: float, places: int, scale: float, facts: list[float]) -> bo
 # skip the warning — so scale differences are treated as the same number.
 _UNIT_MULTIPLIERS = (1.0, 100.0, 0.01, 1e3, 1e-3, 1e6, 1e-6, 1e9, 1e-9)
 
+
+# Two figures agreeing this closely are the same figure restated, not two claims.
+RELATIVE_BAND = 0.015
 
 _HAS_UNIT = re.compile(r"[$%]|bps?\b|[KMBT]\b", re.I)
 
