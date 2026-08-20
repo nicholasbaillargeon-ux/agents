@@ -366,3 +366,34 @@ def test_tokenizer_does_not_duplicate_or_reorder():
     assert tokenize("moving-average moving-average") == ["moving-average", "moving", "average"]
     assert tokenize("c++ and python3.13") == ["c++", "python3.13"]
     assert tokenize("co-op") == ["co-op", "co", "op"]   # "co" is two letters, so kept
+
+
+def test_the_retrieval_width_has_one_source_of_truth():
+    """Three call sites default to it; drift between them is a silent behaviour
+    change in whichever one the caller happens to use."""
+    import inspect
+
+    from agents_work import cli
+    from agents_work.agents.analyst import DEFAULT_K
+
+    assert DEFAULT_K == 12
+    assert inspect.signature(analyst.ask).parameters["k"].default == DEFAULT_K
+    assert inspect.signature(analyst.run).parameters["k"].default == DEFAULT_K
+    assert inspect.signature(Index.search).parameters["k"].default == DEFAULT_K
+    assert cli.analyst.DEFAULT_K == DEFAULT_K
+
+
+def test_the_cli_passes_the_default_width_through(monkeypatch, cfg, capsys):
+    from agents_work import cli
+    from agents_work.agents.analyst import DEFAULT_K
+    monkeypatch.setattr(cli, "load_config", lambda **kw: cfg)
+    seen = {}
+    monkeypatch.setattr(cli.analyst, "run", lambda ctx, q, **kw: seen.update(kw) or
+                        type("R", (), {"agent": "analyst", "target": q, "ok": True,
+                                       "summary": "", "artifact": None, "brief": None,
+                                       "degradations": [], "error": None, "data": {}})())
+    cli.main(["ask", "anything"])
+    assert seen["k"] == DEFAULT_K
+    seen.clear()
+    cli.main(["ask", "anything", "--k", "3"])
+    assert seen["k"] == 3

@@ -90,7 +90,13 @@ in place.
 **analyst** — retrieval is hybrid (BM25 + a local hashed embedding) because
 keyword search alone cannot answer "what did I *conclude*" about a note that
 never uses the word, and time is a filter applied *before* ranking rather than
-a phrase in the prompt. Embeddings use `crc32`, not the builtin `hash()`, which
+a phrase in the prompt. An answer is built from twelve passages, spread across
+documents before any document gets a second slot: the corpus these agents write
+is one document per subject, so a question about "the watchlist" is a question
+about seven files at once. A narrower window covered six of eleven documents and
+dropped a name out of an answer that claimed to cover all of them — and a
+document that was never retrieved cannot be reported as missing, so an omission
+reads exactly like an absence. Embeddings use `crc32`, not the builtin `hash()`, which
 is salted per process — an index built by the timer would not have matched a
 query typed at the CLI.
 

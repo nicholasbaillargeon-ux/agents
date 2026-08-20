@@ -37,6 +37,14 @@ log = logging.getLogger(__name__)
 
 NAME = "analyst"
 DIM = 512
+
+# How many passages an answer is built from. Twelve rather than a handful because
+# the corpus these agents write is one document per subject, so a question about
+# "the watchlist" is a question about seven files at once -- at eight, retrieval
+# covered six of eleven documents and TLT silently dropped out of an answer that
+# claimed to cover every name. The cost is prompt size, which is the cheap side
+# of that trade.
+DEFAULT_K = 12
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
     id        INTEGER PRIMARY KEY,
@@ -248,7 +256,7 @@ class Index:
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
 
-    def search(self, query: str, *, k: int = 6, since: str | None = None,
+    def search(self, query: str, *, k: int = DEFAULT_K, since: str | None = None,
                until: str | None = None, alpha: float = 0.5,
                per_file: int = 2) -> list[Hit]:
         """Hybrid BM25 + cosine, spread across documents.
@@ -413,7 +421,7 @@ class Answer:
         return out
 
 
-def ask(ctx: Context, question: str, *, k: int = 6, since: str | None = None,
+def ask(ctx: Context, question: str, *, k: int = DEFAULT_K, since: str | None = None,
         until: str | None = None, index: Index | None = None,
         today: date | None = None) -> Answer:
     own = index is None
@@ -463,7 +471,7 @@ def ask(ctx: Context, question: str, *, k: int = 6, since: str | None = None,
             idx.close()
 
 
-def run(ctx: Context, question: str, *, reindex: bool = False, k: int = 6,
+def run(ctx: Context, question: str, *, reindex: bool = False, k: int = DEFAULT_K,
         commit: bool = False, **kw) -> AgentResult:
     started = datetime.now(timezone.utc)
     res = AgentResult(agent=NAME, target=question[:80])

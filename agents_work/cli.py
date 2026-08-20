@@ -71,8 +71,8 @@ def main(argv: list[str] | None = None) -> int:
 
     a = sub.add_parser("ask", help="ask the RAG analyst")
     a.add_argument("question")
-    a.add_argument("--k", type=int, default=8,
-                   help="how many passages to retrieve (default 8)")
+    a.add_argument("--k", type=int, default=analyst.DEFAULT_K,
+                   help=f"how many passages to retrieve (default {analyst.DEFAULT_K})")
     a.add_argument("--since", default=None)
     a.add_argument("--reindex", action="store_true")
 
