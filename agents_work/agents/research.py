@@ -221,6 +221,11 @@ def build_brief(ctx: Context, ticker: str) -> tuple[Brief, dict]:
     for label, days in (("1m", "1m"), ("6m", "6m"), ("1y", "1y")):
         if days in d["perf"]:
             snapshot.append([f"Return {label}", f"{d['perf'][days]:+.1f}%"])
+    # Everything the model is shown, the reader can see. This one was in the
+    # dossier but not the table, so a brief could say "4.7% below its 52-week
+    # high" with nothing on the page to check it against.
+    if "52w_high_gap" in d["perf"]:
+        snapshot.append(["From 52-week high", f"{d['perf']['52w_high_gap']:+.1f}%"])
     if "vol_annualised" in d["perf"]:
         snapshot.append(["Annualised vol", f"{d['perf']['vol_annualised']:.1f}%"])
     brief.add("Snapshot", table(["Metric", "Value"], snapshot))

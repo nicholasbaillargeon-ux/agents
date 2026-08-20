@@ -35,6 +35,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | R5 | Multi-class and stale share counts are refused **(regression)** | Berkshire-shaped facts omit market cap rather than using a 2011 count |
 | R6 | Model figures are checked against the dossier | a fabricated figure is listed under "Unverified figures"; a grounded one is not |
 | R7 | Brief structure | Snapshot, filings table, sources, parseable frontmatter |
+| R8 | The reader sees what the model saw | every performance figure in the dossier is also in the Snapshot table — a cited number the reader cannot check on the page is worse than one never offered |
 
 ## 2 · Backtest agent
 

@@ -16,7 +16,12 @@ from __future__ import annotations
 import re
 
 # $1,234.5  ·  12.4%  ·  -3.2  ·  240bp  ·  1.2B
-_NUMBER = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bps?|[KMBT]\b)?", re.I)
+#
+# The lookbehind is what stops "Nasdaq-100" being read as negative one hundred
+# and "$10,000-to-$66,000" as negative sixty-six thousand. A hyphen only means
+# minus at the start of a token, never glued to the end of a word.
+_NUMBER = re.compile(
+    r"(?<![\w.])-?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bps?|[KMBT]\b)?", re.I)
 _SCALES = {"k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12}
 
 
@@ -62,11 +67,16 @@ def _grounded(value: float, places: int, scale: float, facts: list[float]) -> bo
     Precision matters: a dossier holding 253,490,000,000 grounds "$253.5B" and
     "253.49B" but not "$260B". Percentages are also checked against their
     fractional twin, since the dossier stores 0.63 for what prose calls 63%.
+
+    Magnitude is compared, not sign. English carries direction in words —
+    "sits 0.9% off its 52-week high" is the correct rendering of a -0.9 dossier
+    figure, and flagging it fires the warning on almost every brief written.
     """
     tolerance = max(scale * 10.0 ** (-places) / 2.0, abs(value) * 1e-9)
+    target = abs(value)
     for fact in facts:
         for multiplier in _UNIT_MULTIPLIERS:
-            if abs(fact * multiplier - value) <= tolerance:
+            if abs(abs(fact * multiplier) - target) <= tolerance:
                 return True
     return False
 
@@ -78,6 +88,8 @@ def _grounded(value: float, places: int, scale: float, facts: list[float]) -> bo
 # skip the warning — so scale differences are treated as the same number.
 _UNIT_MULTIPLIERS = (1.0, 100.0, 0.01, 1e3, 1e-3, 1e6, 1e-6, 1e9, 1e-9)
 
+
+_HAS_UNIT = re.compile(r"[$%]|bps?\b|[KMBT]\b", re.I)
 
 # Years, small counts and round percentages are not claims about the company.
 _ALWAYS_OK = set(range(0, 13)) | {15, 20, 25, 30, 50, 52, 75, 100}
@@ -93,6 +105,13 @@ def ungrounded(prose: str, dossier: str, *, limit: int = 8) -> list[str]:
         if value in _ALWAYS_OK and places == 0:
             continue
         if 1900 <= value <= 2100 and places == 0:  # a year
+            continue
+        # A bare integer with no unit is an index name, a count or an ordinal —
+        # "the Nasdaq-100", "22 stocks at highs", "three segments". A fabricated
+        # financial claim essentially always carries a unit: $, %, bp, or a
+        # magnitude suffix. Checking bare integers costs far more false alarms
+        # than it catches.
+        if places == 0 and scale == 1.0 and not _HAS_UNIT.search(token):
             continue
         if _grounded(value, places, scale, facts):
             continue

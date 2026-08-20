@@ -196,3 +196,58 @@ def test_run_watchlist_returns_one_result_per_ticker(wired):
     results = research.run_watchlist(wired, ["SPY", "SPY"], commit=False)
     assert len(results) == 2
     assert all(r.ok for r in results)
+
+
+# -- grounding precision (R6) ------------------------------------------------
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("prose,dossier,label", [
+    ("sits 0.9% off its 52-week high", "PERFORMANCE: 52w_high_gap -0.9",
+     "direction lives in the words, not the sign"),
+    ("the Nasdaq-100 tracks the largest names", "HEADLINES: none retrieved",
+     "a hyphen glued to a word is not a minus sign"),
+    ("a $10,000-to-$66,000 decade return", "HEADLINE: $10,000 to $66,000 over a decade",
+     "a range is two numbers, not a negative"),
+    ("the S&P 500 rallied and 22 stocks hit highs", "PRICE: last 762.60",
+     "bare integers are index names and counts"),
+    ("revenue fell 6.8% year on year", "REVENUE growth -6.8%", "a fall stated as positive"),
+])
+def test_grounding_does_not_cry_wolf(prose, dossier, label):
+    """R6: a warning that fires on a correct brief is one nobody reads."""
+    assert ungrounded(prose, dossier) == [], label
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("prose,dossier,expected", [
+    ("gross margin was 74.2%", "REVENUE: $253.49B, net margin 63.0%", ["74.2%"]),
+    ("a $500B backlog", "REVENUE TTM: $253.49B", ["$500B"]),
+    ("the 10y sits at 4.7%", "PRICE: last 82.34, 1y +1.4%", ["4.7%"]),
+    ("margins compressed 240bp", "NET MARGIN: 63.0%", ["240bp"]),
+])
+def test_grounding_still_catches_what_matters(prose, dossier, expected):
+    """R6: the loosening must not cost the catches."""
+    assert ungrounded(prose, dossier) == expected
+
+
+def test_a_figure_only_in_a_headline_is_grounded():
+    dossier = ("PRICE: last 710.93\nHEADLINES (most recent first):\n"
+               "  - [2h ago] Nasdaq slides as WMT drops 6.4% on guidance (Reuters)")
+    assert ungrounded("WMT fell 6.4%, dragging the index.", dossier) == []
+
+
+@pytest.mark.benchmark
+def test_every_performance_figure_the_model_sees_is_on_the_page(wired):
+    """R8. The dossier carried the 52-week-high gap and the Snapshot did not, so
+    a brief could cite "4.7% below its 52-week high" with nothing on the page to
+    check it against. A figure the reader cannot verify is worse than one that
+    was never offered."""
+    wired.llm.default_response = SECTIONS
+    brief, d = research.build_brief(wired, "SPY")
+    dossier = wired.llm.prompts[0]
+    snapshot = next(s.body for s in brief.sections if s.heading == "Snapshot")
+
+    assert d["perf"], "fixture produced no performance figures to check"
+    for key, value in d["perf"].items():
+        assert f"{value:+.1f}" in snapshot or f"{value:.1f}" in snapshot, (
+            f"{key} ({value:.1f}) is in the dossier but not the Snapshot table")
+        assert f"{value:.1f}" in dossier or f"{value:+.1f}" in dossier
