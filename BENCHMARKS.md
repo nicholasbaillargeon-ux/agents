@@ -71,6 +71,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | S7 | Identity in the query string is preserved **(regression)** | six firms point every posting at one careers page and differ only by `gh_jid`/`id`/`token`; stripping the query collapsed 107 Jump Trading roles to one key. Tracking params are dropped, identifying ones kept, and an unresolvable verdict url is dropped rather than attached to the wrong row |
 | S8 | Nothing is claimed that is not shown **(regression)** | with more qualifying postings than the display cap, only the shown ones are marked seen and the brief states how many are queued |
 | S9 | Every displayed row is ranked **(regression)** | the ranking cap matches the display cap, and a genuinely partial answer says "for N of M rows" rather than leaving silent dashes |
+| S10 | Ranking batches | 60 postings produce 3 model calls and 60 verdicts; one unusable batch costs only its own 25. A single completion for a hundred verdicts truncates mid-array and parses as nothing, so a raised cap would cost *every* verdict |
 
 ## 5 · Personal RAG analyst
 

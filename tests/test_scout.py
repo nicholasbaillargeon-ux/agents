@@ -392,3 +392,68 @@ def test_partial_ranking_is_declared(ctx, fetcher):
     brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=True)
     assert len(data["verdicts"]) == 1
     assert "for 1 of 4 rows" in brief.render()
+
+
+# -- batched ranking ---------------------------------------------------------
+
+@pytest.mark.benchmark
+def test_ranking_batches_so_a_large_run_still_gets_verdicts(ctx, fetcher, cfg):
+    """S10 (regression risk). One verdict is ~40 tokens of JSON; asking for a
+    hundred in one completion truncates the array mid-element, which parses as
+    nothing. A raised cap would then cost every verdict, not a few."""
+    from agents_work.llm import FakeLLM
+    postings = [Posting("QuantCo", f"Quant Intern {i}", "NYC", f"https://x.com/jobs/{i}")
+                for i in range(60)]
+    replies = []
+    for start in range(0, 60, 25):
+        chunk = postings[start:start + 25]
+        replies.append(json.dumps([{"url": p.url, "verdict": "apply", "why": "fit"}
+                                   for p in chunk]))
+    ctx.llm = FakeLLM(cfg, replies)
+
+    verdicts = scout.rank(ctx, postings)
+    assert len(ctx.llm.prompts) == 3, "did not batch"
+    assert len(verdicts) == 60, "verdicts lost between batches"
+    assert all(len(p) < 40_000 for p in ctx.llm.prompts)
+
+
+def test_a_failed_batch_costs_only_that_batch(ctx, fetcher, cfg):
+    from agents_work.llm import FakeLLM
+    postings = [Posting("QuantCo", f"Quant Intern {i}", "NYC", f"https://x.com/jobs/{i}")
+                for i in range(50)]
+    good = json.dumps([{"url": p.url, "verdict": "apply", "why": "fit"}
+                       for p in postings[:25]])
+    ctx.llm = FakeLLM(cfg, [good, "I cannot comply with that."])
+    verdicts = scout.rank(ctx, postings)
+    assert len(verdicts) == 25
+    assert all(p.key in verdicts for p in postings[:25])
+
+
+def test_max_tokens_scales_with_the_batch(ctx, cfg, monkeypatch):
+    seen = {}
+    from agents_work.llm import FakeLLM
+    ctx.llm = FakeLLM(cfg, ["[]"])
+    real = ctx.llm.json
+    monkeypatch.setattr(ctx.llm, "json",
+                        lambda prompt, **kw: seen.update(kw) or real(prompt, **kw))
+    scout.rank(ctx, [Posting("C", f"T{i}", "L", f"https://x/{i}") for i in range(25)])
+    assert seen["max_tokens"] >= 25 * 40
+
+
+def test_the_display_cap_is_reachable_from_the_cli(ctx, fetcher, monkeypatch, cfg):
+    from agents_work import cli
+    monkeypatch.setattr(cli, "load_config", lambda **kw: cfg)
+    captured = {}
+    monkeypatch.setattr(cli.scout, "run", lambda ctx, **kw: captured.update(kw) or
+                        type("R", (), {"agent": "scout", "target": "", "ok": True,
+                                       "summary": "", "artifact": None, "degradations": [],
+                                       "error": None, "data": {}})())
+    cli.main(["scout", "--limit", "250"])
+    assert captured["limit"] == 250
+    captured.clear()
+    cli.main(["scout"])
+    assert "limit" not in captured, "the CLI should not override the module default"
+
+
+def test_the_default_display_cap_is_generous():
+    assert scout.DISPLAY_LIMIT >= 100

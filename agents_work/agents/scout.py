@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 
 NAME = "scout"
 
+# How many new postings one brief will show. Steady-state nightly volume
+# across these boards is well under this, so the cap only binds after a
+# registry change adds a board -- and when it does, the brief says so and the
+# remainder queue rather than vanishing.
+DISPLAY_LIMIT = 100
+
 SYSTEM = (
     "You triage job postings for one candidate: an undergraduate targeting "
     "quant / fintech / AI internships, strongest in Python, data pipelines, and "
@@ -35,36 +41,52 @@ SYSTEM = (
 )
 
 
-def rank(ctx: Context, postings: list[Posting], *, limit: int = 20) -> dict[str, dict]:
-    """LLM verdicts keyed by URL. Empty dict when the model is unavailable —
-    the deterministic score already ordered the list."""
+# One verdict costs the model roughly 40 tokens of JSON. Asking for a hundred in
+# a single completion overruns any sane max_tokens and the reply is truncated
+# mid-array — which parses as nothing, so a larger cap would silently cost every
+# verdict rather than a few. Batching keeps each reply comfortably inside its
+# budget and makes one bad batch cost only that batch.
+RANK_BATCH = 25
+TOKENS_PER_VERDICT = 80
+
+
+def rank(ctx: Context, postings: list[Posting], *, limit: int | None = None,
+         batch_size: int = RANK_BATCH) -> dict[str, dict]:
+    """LLM verdicts keyed by posting key. Empty dict when the model is
+    unavailable — the deterministic score already ordered the list."""
     if not postings or not ctx.llm.available:
         return {}
-    # Send the canonical key, not the raw URL: the verdicts come back keyed by
-    # whatever was sent, and the caller looks them up by key.
-    lines = [f"- url: {p.key}\n  company: {p.company}\n  title: {p.title}\n"
-             f"  location: {p.location}" for p in postings[:limit]]
-    verdicts = ctx.llm.json(
-        "Postings:\n" + "\n".join(lines), system=SYSTEM, fast=True,
-        max_tokens=2000, default=[])
-    if not isinstance(verdicts, list):
-        return {}
-    out = {}
-    known = {p.key for p in postings}
-    for v in verdicts:
-        if not isinstance(v, dict) or not v.get("url"):
+    wanted = postings if limit is None else postings[:limit]
+    known = {p.key for p in wanted}
+    out: dict[str, dict] = {}
+
+    for start in range(0, len(wanted), batch_size):
+        batch = wanted[start:start + batch_size]
+        # Send the canonical key, not the raw URL: verdicts come back keyed by
+        # whatever was sent, and the caller looks them up by key.
+        lines = [f"- url: {p.key}\n  company: {p.company}\n  title: {p.title}\n"
+                 f"  location: {p.location}" for p in batch]
+        verdicts = ctx.llm.json(
+            "Postings:\n" + "\n".join(lines), system=SYSTEM, fast=True,
+            max_tokens=max(1000, len(batch) * TOKENS_PER_VERDICT), default=[])
+        if not isinstance(verdicts, list):
+            log.warning("batch %d returned %s, not a list", start // batch_size,
+                        type(verdicts).__name__)
             continue
-        # Canonicalise whatever the model echoed back — it re-adds tracking
-        # parameters and trailing slashes. A url that still does not resolve to
-        # a posting is dropped rather than guessed at: on the boards that put
-        # identity in the query string, a near-match would attach one role's
-        # verdict to another's row.
-        key = posting_key(str(v["url"]))
-        if key not in known:
-            log.debug("verdict for an unrecognised url dropped: %s", v["url"])
-            continue
-        out[key] = {"verdict": str(v.get("verdict", "")).lower(),
-                    "why": str(v.get("why", ""))[:120]}
+        for v in verdicts:
+            if not isinstance(v, dict) or not v.get("url"):
+                continue
+            # Canonicalise whatever the model echoed back — it re-adds tracking
+            # parameters and trailing slashes. A url that still does not resolve
+            # to a posting is dropped rather than guessed at: on the boards that
+            # put identity in the query string, a near-match would attach one
+            # role's verdict to another's row.
+            key = posting_key(str(v["url"]))
+            if key not in known:
+                log.debug("verdict for an unrecognised url dropped: %s", v["url"])
+                continue
+            out[key] = {"verdict": str(v.get("verdict", "")).lower(),
+                        "why": str(v.get("why", ""))[:120]}
     return out
 
 
@@ -72,7 +94,7 @@ VERDICT_ORDER = {"apply": 0, "maybe": 1, "": 2, "skip": 3}
 
 
 def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
-                internships_only: bool = True, limit: int = 25,
+                internships_only: bool = True, limit: int = DISPLAY_LIMIT,
                 use_llm: bool = True) -> tuple[Brief, dict]:
     boards = Boards(ctx.fetcher)
     all_postings = boards.fetch_all(registry, ttl=1800)

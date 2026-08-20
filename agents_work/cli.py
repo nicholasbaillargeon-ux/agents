@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--min-score", type=int, default=4)
     s.add_argument("--all-roles", action="store_true", help="not just internship titles")
     s.add_argument("--no-llm", action="store_true", help="skip model verdicts")
+    s.add_argument("--limit", type=int, default=None,
+                   help="how many new postings to show (default 100); raise it to "
+                        "drain a backlog in one run")
 
     a = sub.add_parser("ask", help="ask the RAG analyst")
     a.add_argument("question")
@@ -113,9 +116,10 @@ def main(argv: list[str] | None = None) -> int:
             wl = args.watchlist.split(",") if args.watchlist else None
             return _print_result(briefing.run(ctx, watchlist=wl, commit=commit), as_json=args.json)
         if args.cmd == "scout":
+            kw = {} if args.limit is None else {"limit": args.limit}
             return _print_result(scout.run(
                 ctx, min_score=args.min_score, internships_only=not args.all_roles,
-                use_llm=not args.no_llm, commit=commit), as_json=args.json)
+                use_llm=not args.no_llm, commit=commit, **kw), as_json=args.json)
         if args.cmd == "ask":
             res = analyst.run(ctx, args.question, k=args.k, since=args.since,
                               reindex=args.reindex)
