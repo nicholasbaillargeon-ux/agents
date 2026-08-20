@@ -40,6 +40,9 @@ class LLM:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.usage = Usage()
+        # Why the last reply ended. "max_tokens" means it was cut off mid-sentence
+        # and whatever the caller asked for last is simply missing.
+        self.last_stop_reason: str | None = None
         self._client: anthropic.Anthropic | None = None
         if cfg.llm_api_key:
             self._client = anthropic.Anthropic(
@@ -86,6 +89,10 @@ class LLM:
         except anthropic.APIConnectionError as e:
             raise LLMUnavailable(f"cannot reach {self.cfg.llm_base_url}: {e}") from e
 
+        self.last_stop_reason = getattr(resp, "stop_reason", None)
+        if self.last_stop_reason == "max_tokens":
+            log.warning("completion from %s hit the %d-token cap; the reply is cut off",
+                        model, max_tokens)
         if getattr(resp, "usage", None):
             self.usage = self.usage + Usage(resp.usage.input_tokens, resp.usage.output_tokens)
         if getattr(resp, "stop_reason", None) == "refusal":
@@ -146,6 +153,7 @@ class FakeLLM(LLM):
         self.usage = Usage()
         self._client = None
         self.prompts: list[str] = []
+        self.last_stop_reason: str | None = None
         self._available = available
         self._responses = list(responses or [])
         self.default_response = "FAKE"

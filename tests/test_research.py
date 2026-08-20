@@ -266,3 +266,40 @@ def test_prose_restates_rather_than_transcribes(prose, dossier, expected, why):
     """R6: a brief that rounds for readability is not a brief that invented a
     number, and the check has to tell those apart to be worth reading."""
     assert ungrounded(prose, dossier) == expected, why
+
+
+@pytest.mark.benchmark
+def test_a_brief_missing_a_section_says_so(wired):
+    """R9 (regression). A real MSFT brief shipped with Thesis only — no Risks, no
+    Valuation context — and `degraded: false`. It looked finished."""
+    wired.llm.default_response = "## Thesis\n\nThe case is the datacenter backlog."
+    brief, _ = research.build_brief(wired, "SPY")
+    headings = [s.heading for s in brief.sections]
+    assert "Risks" not in headings
+    assert any("analysis incomplete" in d for d in brief.degradations)
+    assert "Risks, Valuation context" in " ".join(brief.degradations)
+    assert "degraded: true" in brief.render()
+
+
+@pytest.mark.benchmark
+def test_a_truncated_reply_is_named_as_truncated(wired):
+    """R9: the two causes need different fixes, so the brief distinguishes them."""
+    wired.llm.default_response = "## Thesis\n\nThe case is the backlog."
+    wired.llm.last_stop_reason = "max_tokens"
+    brief, _ = research.build_brief(wired, "SPY")
+    assert any("cut off at the token limit" in d for d in brief.degradations)
+
+
+def test_a_complete_brief_is_not_flagged(wired):
+    wired.llm.default_response = SECTIONS
+    brief, _ = research.build_brief(wired, "SPY")
+    assert not any("analysis incomplete" in d for d in brief.degradations)
+
+
+def test_unheaded_prose_is_not_treated_as_missing_sections(wired):
+    """The model ignoring headings entirely is already handled by keeping the
+    prose under 'Analysis'; it must not also be reported as three losses."""
+    wired.llm.default_response = "Just prose, no headings at all."
+    brief, _ = research.build_brief(wired, "SPY")
+    assert "Analysis" in [s.heading for s in brief.sections]
+    assert not any("analysis incomplete" in d for d in brief.degradations)

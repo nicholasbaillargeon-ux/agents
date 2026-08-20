@@ -142,6 +142,11 @@ def _dossier(d: dict) -> str:
     return "\n".join(lines)
 
 
+# The three the prompt asks for. A brief missing one is not a shorter brief, it
+# is a brief whose reader does not know a section was requested and lost.
+EXPECTED_SECTIONS = ("Thesis", "Risks", "Valuation context")
+
+
 def _write_sections(ctx: Context, d: dict, brief: Brief) -> None:
     dossier = _dossier(d)
     prompt = (
@@ -158,16 +163,27 @@ def _write_sections(ctx: Context, d: dict, brief: Brief) -> None:
         "and why it matters. Do not compare to peers — you have no peer data."
     )
     try:
-        text = ctx.llm.complete(prompt, system=SYSTEM, max_tokens=2000)
+        text = ctx.llm.complete(prompt, system=SYSTEM, max_tokens=4000)
     except LLMUnavailable as e:
         brief.degrade(f"analysis sections omitted ({e})")
         brief.add("Thesis", "_Not written — the language model was unavailable for this run. "
                             "The data sections above are complete and unaffected._")
         return
     flagged: list[str] = []
+    written = set()
     for heading, body in _split_sections(text):
         brief.add(heading, body)
+        written.add(heading.strip().lower())
         flagged += [f for f in ungrounded(body, dossier) if f not in flagged]
+
+    missing = [h for h in EXPECTED_SECTIONS if h.lower() not in written]
+    if missing and "analysis" not in written:
+        # Either the reply was cut off at the token cap or the model ignored the
+        # headings. Both leave a brief that looks finished and is not.
+        why = ("the reply was cut off at the token limit"
+               if getattr(ctx.llm, "last_stop_reason", None) == "max_tokens"
+               else "the model did not return them")
+        brief.degrade(f"analysis incomplete — {', '.join(missing)} missing ({why})")
     if flagged:
         # Not an error: a derived figure ("margins compressed 240bp") is legitimate
         # and still unverifiable from the dossier. Naming them is the point.

@@ -12,7 +12,8 @@ import pytest
 from conftest import GOLD
 
 from agents_work.agents import analyst
-from agents_work.agents.analyst import Index, ask, chunk_markdown, embed, time_window, tokenize
+from agents_work.agents.analyst import (Hit, Index, ask, chunk_markdown, embed, time_window,
+                                        tokenize)
 from agents_work.llm import FakeLLM
 
 
@@ -221,3 +222,147 @@ def test_query_latency(index):
         timings.append((time.perf_counter() - t0) * 1000)
     median = statistics.median(timings)
     assert median < 150, f"median {median:.0f} ms"
+
+
+# -- A8: retrieval spreads across documents ----------------------------------
+
+@pytest.mark.benchmark
+def test_retrieval_spreads_across_documents(cfg, tmp_path):
+    """A8 (regression). Asked to compare seven briefs, pure score order returned
+    two chunks of one brief and a headline list, and omitted the only two names
+    that carried the multiple the question was about — so the answer reported
+    that the corpus contained one.
+
+    Built on its own corpus: every document answers the question, and one of
+    them answers it in several places, which is exactly when score order
+    collapses onto a single file.
+    """
+    vault = tmp_path / "briefs"
+    vault.mkdir()
+    for name in ("nvda", "aapl", "msft", "qqq", "spy", "tlt"):
+        sections = "\n\n".join(
+            f"## {heading}\n\nThe valuation multiple for {name.upper()} against its "
+            f"own growth rate, discussed at length under {heading.lower()}."
+            for heading in ("Thesis", "Valuation context", "Risks"))
+        (vault / f"2026-08-20-{name}.md").write_text(
+            f"---\ndate: 2026-08-20\n---\n\n# {name.upper()}\n\n{sections}\n")
+
+    idx = Index(cfg.data_dir / "spread.db")
+    idx.build([vault])
+    hits = idx.search("which name is most expensive relative to its own growth", k=8)
+    idx.close()
+
+    paths = [h.path for h in hits]
+    assert len(paths) == 8
+    assert len(set(paths)) == 6, (
+        f"all six documents should be represented, got {len(set(paths))}: "
+        f"{sorted(set(paths))}")
+
+
+@pytest.mark.benchmark
+def test_spread_prefers_breadth_then_score():
+    """A8: k documents represented before any document gets a second slot."""
+    from agents_work.agents.analyst import _spread
+    hits = [Hit("a.md", "h1", "c", "", 0.90), Hit("a.md", "h2", "c", "", 0.85),
+            Hit("a.md", "h3", "c", "", 0.80), Hit("b.md", "h1", "c", "", 0.70),
+            Hit("c.md", "h1", "c", "", 0.60)]
+    assert [h.path for h in _spread(hits, 3, per_file=2)] == ["a.md", "b.md", "c.md"]
+    # slots left over after every document is represented go to the best chunks
+    got = _spread(hits, 4, per_file=2)
+    assert sorted(h.path for h in got) == ["a.md", "a.md", "b.md", "c.md"]
+    assert [h.score for h in got] == sorted((h.score for h in got), reverse=True)
+
+
+def test_spread_respects_the_per_file_cap():
+    from agents_work.agents.analyst import _spread
+    hits = [Hit("a.md", str(i), "c", "", 1.0 - i / 10) for i in range(6)]
+    assert len(_spread(hits, 4, per_file=2)) == 4      # falls back when documents run out
+    assert len({id(h) for h in _spread(hits, 4, per_file=2)}) == 4
+
+
+def test_spread_handles_degenerate_inputs():
+    from agents_work.agents.analyst import _spread
+    assert _spread([], 5, 2) == []
+    assert _spread([Hit("a.md", "", "c", "", 1.0)], 0, 2) == []
+    one = [Hit("a.md", "", "c", "", 1.0), Hit("b.md", "", "c", "", 0.5)]
+    assert len(_spread(one, 5, per_file=0)) == 2
+
+
+@pytest.mark.benchmark
+def test_a_single_document_question_still_gets_depth(cfg, tmp_path):
+    """A8: breadth must not starve a question about one document. Asked what a
+    backtest found, pure breadth returned one chunk of it and seven of
+    everything else, so the answer could not describe the strategy."""
+    vault = tmp_path / "corpus"
+    (vault / "backtests").mkdir(parents=True)
+    (vault / "briefs").mkdir()
+    (vault / "backtests" / "2026-08-20-spy.md").write_text(
+        "---\ndate: 2026-08-20\n---\n\n"
+        "## Idea\n\nThe moving-average crossover strategy buys the 20-day over 50-day.\n\n"
+        "## Results\n\nThe moving-average crossover produced a Sharpe of 0.64.\n\n"
+        "## Cost drag\n\nThe moving-average crossover paid 4.8x turnover a year.\n\n"
+        "## Method\n\nThe moving-average crossover fills at the next open.\n")
+    for name in ("nvda", "aapl", "msft", "qqq", "spy", "tlt"):
+        (vault / "briefs" / f"2026-08-20-{name}.md").write_text(
+            f"---\ndate: 2026-08-20\n---\n\n## Thesis\n\n{name.upper()} valuation and "
+            "growth, unrelated to any moving-average strategy.\n")
+
+    idx = Index(cfg.data_dir / "depth.db")
+    idx.build([vault])
+    hits = idx.search("what did my moving-average crossover backtest find", k=8)
+    idx.close()
+
+    from_backtest = [h for h in hits if h.path.startswith("backtests/")]
+    assert len(from_backtest) >= 2, (
+        f"only {len(from_backtest)} of {len(hits)} chunks came from the document "
+        f"the question named: {[h.path for h in hits]}")
+
+
+def test_breadth_and_depth_split_is_proportional_to_k():
+    from agents_work.agents.analyst import _spread
+    hits = [Hit(f"{i}.md", "h", "c", "", 1.0 - i / 100) for i in range(20)]
+    for k in (4, 6, 8, 12):
+        got = _spread(hits, k, per_file=2)
+        assert len(got) == k
+        assert len({h.path for h in got}) >= k - max(1, k // 4)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("k", [1, 2, 3, 4, 5, 6, 8, 12, 30])
+def test_spread_never_returns_more_than_k(k):
+    """A8 (regression). Breaking out of the breadth pass at exactly k slots fell
+    through to the fill pass and returned k+1 passages, which quietly widens
+    every prompt built from them."""
+    from agents_work.agents.analyst import _spread
+    hits = [Hit(f"{i % 4}.md", f"h{i}", "c", "", 1.0 - i / 100) for i in range(20)]
+    got = _spread(hits, k, per_file=2)
+    assert len(got) == min(k, len(hits))
+    assert len({id(h) for h in got}) == len(got), "a chunk was returned twice"
+
+
+@pytest.mark.benchmark
+def test_hyphenated_compounds_match_their_parts(cfg, tmp_path):
+    """A9 (regression). "moving-average crossover" shared not one token with a
+    brief describing a "20-day moving average", so the retriever returned that
+    backtest's cost table instead of its strategy."""
+    assert set(tokenize("a moving-average crossover")) >= {"moving", "average"}
+    assert "moving-average" in tokenize("a moving-average crossover")
+
+    vault = tmp_path / "corpus"
+    vault.mkdir()
+    (vault / "2026-08-20-backtest.md").write_text(
+        "---\ndate: 2026-08-20\n---\n\n"
+        "## Idea\n\nBuy when the 20-day moving average crosses above the 50-day.\n\n"
+        "## Cost drag\n\nSharpe gross 0.68 against net 0.64 at 4.8x turnover.\n")
+    idx = Index(cfg.data_dir / "hyphen.db")
+    idx.build([vault])
+    top = idx.search("what did the moving-average crossover do", k=1)
+    idx.close()
+    assert top and top[0].heading == "Idea", (
+        f"retrieved {top[0].heading if top else 'nothing'} instead of the strategy")
+
+
+def test_tokenizer_does_not_duplicate_or_reorder():
+    assert tokenize("moving-average moving-average") == ["moving-average", "moving", "average"]
+    assert tokenize("c++ and python3.13") == ["c++", "python3.13"]
+    assert tokenize("co-op") == ["co-op", "co", "op"]   # "co" is two letters, so kept

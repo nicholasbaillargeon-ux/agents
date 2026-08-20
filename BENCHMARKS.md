@@ -35,6 +35,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | R5 | Multi-class and stale share counts are refused **(regression)** | Berkshire-shaped facts omit market cap rather than using a 2011 count |
 | R6 | Model figures are checked against the dossier | a fabricated figure is listed under "Unverified figures"; a grounded one is not |
 | R7 | Brief structure | Snapshot, filings table, sources, parseable frontmatter |
+| R9 | A brief that lost a section says so **(regression)** | a real MSFT brief shipped with Thesis only and `degraded: false`; missing sections are now named, and a reply cut off at the token cap is distinguished from a model that ignored the headings |
 | R8 | The reader sees what the model saw | every performance figure in the dossier is also in the Snapshot table — a cited number the reader cannot check on the page is worse than one never offered |
 
 ## 2 · Backtest agent
@@ -86,6 +87,8 @@ Each gate names the failure it exists to prevent. Several of them were written
 | A5 | Citations are real | every cited path exists in the index |
 | A6 | The index is process-stable **(regression)** | embeddings built in one process match a query embedded in another (crc32, not salted `hash()`) |
 | A7 | Search-only degradation | with no LLM, passages are still returned and labelled search-only |
+| A8 | Retrieval balances breadth and depth **(regression)** | a cross-document question gets one passage from each of `k - k/4` documents before any gets a second; a single-document question still gets several passages of it. `_spread` never returns more than k |
+| A9 | Hyphenated compounds match their parts **(regression)** | "moving-average crossover" shared no token with a brief describing a "20-day moving average", so the retriever returned that backtest's cost table instead of its strategy |
 
 ## 6 · Performance
 

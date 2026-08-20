@@ -76,7 +76,20 @@ _STOP = {
 
 
 def tokenize(text: str) -> list[str]:
-    return [t for t in _TOKEN.findall(text.lower()) if t not in _STOP and len(t) > 1]
+    """Words, plus the parts of any hyphenated compound.
+
+    A compound is indexed as itself *and* as its pieces, because writers are not
+    consistent about the hyphen and the reader should not have to be. Asked
+    about a "moving-average crossover", the retriever shared not one token with
+    a brief describing a "20-day moving average" and returned the cost table
+    instead of the strategy.
+    """
+    out: list[str] = []
+    for token in _TOKEN.findall(text.lower()):
+        for form in (token, *(token.split("-") if "-" in token else ())):
+            if form not in _STOP and len(form) > 1 and form not in out:
+                out.append(form)
+    return out
 
 
 def embed(text: str, dim: int = DIM) -> list[float]:
@@ -236,8 +249,20 @@ class Index:
         return self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
 
     def search(self, query: str, *, k: int = 6, since: str | None = None,
-               until: str | None = None, alpha: float = 0.5) -> list[Hit]:
-        """Hybrid BM25 + cosine. `alpha` weights lexical against semantic."""
+               until: str | None = None, alpha: float = 0.5,
+               per_file: int = 2) -> list[Hit]:
+        """Hybrid BM25 + cosine, spread across documents.
+
+        `alpha` weights lexical against semantic. `per_file` caps how many
+        chunks one document may contribute before others get a turn.
+
+        Breadth matters more than it looks. Asked to compare seven research
+        briefs, pure score order returned two chunks of the same brief and a
+        headline list, and left out the only two names that had the multiple the
+        question was about — so the answer confidently reported that the corpus
+        contained one. A cross-document question needs one good passage from
+        many documents, not the best passages overall.
+        """
         sql = "SELECT * FROM notes"
         clauses, args = [], []
         if since:
@@ -265,7 +290,62 @@ class Index:
             hits.append(Hit(row["path"], row["heading"], row["content"],
                             row["note_date"], combined, doc_lex / lex_max, sem))
         hits.sort(key=lambda h: -h.score)
-        return [h for h in hits[:k] if h.score > 0]
+        return [h for h in _spread(hits, k, per_file) if h.score > 0]
+
+
+def _spread(hits: list[Hit], k: int, per_file: int) -> list[Hit]:
+    """Best chunk from each document first, then fill by score.
+
+    Two passes rather than a per-file cap applied in one: the first guarantees
+    that k documents are represented before any document gets a second slot,
+    which is the property a comparison question needs.
+    """
+    if k <= 0 or not hits:
+        return []
+    if per_file <= 0:
+        return hits[:k]
+
+    # Breadth first, but not with every slot. A question about one document
+    # ("what did my backtest find") is served badly by one chunk of it and seven
+    # of everything else, and a question across documents is served badly by
+    # three chunks of the same brief. Reserving a quarter of the slots for score
+    # order lets the same retriever answer both shapes.
+    # A quarter of the slots, rounded down: small k stays purely broad, since
+    # with four slots there is no depth worth reserving.
+    breadth = k - k // 4
+
+    chosen: list[Hit] = []
+    taken: set[int] = set()
+    seen_paths: set[str] = set()
+    for i, hit in enumerate(hits):
+        if hit.path in seen_paths:
+            continue
+        seen_paths.add(hit.path)
+        chosen.append(hit)
+        taken.add(i)
+        if len(chosen) >= breadth:
+            break
+
+    # The length check comes before the append, not after: breaking out of the
+    # breadth pass at exactly k slots used to fall through to here and return
+    # k + 1 passages.
+    counts = Counter(h.path for h in chosen)
+    for i, hit in enumerate(hits):
+        if len(chosen) >= k:
+            break
+        if i in taken or counts[hit.path] >= per_file:
+            continue
+        chosen.append(hit)
+        counts[hit.path] += 1
+        taken.add(i)
+    for i, hit in enumerate(hits):  # fewer documents than slots: fill with the rest
+        if len(chosen) >= k:
+            break
+        if i not in taken:
+            chosen.append(hit)
+            taken.add(i)
+    chosen.sort(key=lambda h: -h.score)
+    return chosen
 
 
 def _bm25(query: list[str], docs: list[list[str]], k1: float = 1.5, b: float = 0.75) -> list[float]:
