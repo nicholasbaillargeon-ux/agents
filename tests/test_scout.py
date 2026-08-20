@@ -513,3 +513,36 @@ def test_an_empty_first_run_of_the_day_still_writes(ctx, fetcher):
     res = scout.run(ctx, registry=REGISTRY, use_llm=False, commit=False)
     assert res.artifact.is_file()
     assert "Nothing new" in res.artifact.read_text()
+
+
+@pytest.mark.benchmark
+def test_the_digest_leads_with_a_shortlist(ctx, fetcher):
+    """S12. A 129-row table is fourteen chunks to a retriever and a wall to a
+    reader, and neither starts at the top: asked which roles to prioritise, the
+    analyst kept quoting an arbitrary mid-table slice. The shortlist puts the
+    answer in one place small enough to read or retrieve whole."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+        for i in range(14)]})
+    ctx.llm.default_response = json.dumps(
+        [{"url": f"https://x.com/jobs/{i}", "verdict": "apply" if i < 12 else "skip",
+          "why": f"reason {i}"} for i in range(14)])
+
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
+    text = brief.render()
+    shortlist = text.split("## Worth applying to")[1].split("##")[0]
+
+    assert shortlist.count("https://x.com/jobs/") == scout.TOP_MATCHES
+    assert "reason 0" in shortlist
+    assert "jobs/13" not in shortlist, "a skip verdict reached the shortlist"
+    assert len(shortlist) < 2000, "the shortlist must fit one retrieval chunk"
+    assert text.index("Worth applying to") < text.index("Surfaced today")
+
+
+def test_the_shortlist_is_absent_when_nothing_is_worth_applying_to(ctx, fetcher):
+    wire(fetcher)
+    ctx.llm.default_response = json.dumps(
+        [{"url": "https://jobs.ashbyhq.com/aico/1", "verdict": "skip", "why": "no"}])
+    brief, _ = scout.build_brief(ctx, registry=REGISTRY, use_llm=True)
+    assert "Worth applying to" not in brief.render()

@@ -31,6 +31,9 @@ NAME = "scout"
 # remainder queue rather than vanishing.
 DISPLAY_LIMIT = 100
 
+# How many of the day's "apply" verdicts to lift out as a shortlist.
+TOP_MATCHES = 10
+
 SYSTEM = (
     "You triage job postings for one candidate: an undergraduate targeting "
     "quant / fintech / AI internships, strongest in Python, data pipelines, and "
@@ -144,6 +147,20 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     # the 29 postings the display cap had queued and replaced 100 rows with 29.
     # Rendering the union makes the file monotonic within a day and removes the
     # special case rather than guarding it.
+    # A 129-row table is fourteen chunks to a retriever and a wall to a reader,
+    # and neither of them starts at the top. The shortlist is the answer to
+    # "which should I apply to" in one place small enough to be read or
+    # retrieved whole.
+    shortlist = sorted((p for p in surfaced if p.get("verdict") == "apply"),
+                       key=lambda p: -p.get("score", 0))[:TOP_MATCHES]
+    if shortlist:
+        brief.add("Worth applying to", "\n".join(
+            f"{i}. **{p.get('company', '')}** — [{p.get('title', '')}]({p.get('url', '')})"
+            f" · {p.get('location') or 'location not stated'}"
+            f" · score {p.get('score', 0)}"
+            + (f" · _{p['why']}_" if p.get("why") else "")
+            for i, p in enumerate(shortlist, 1)))
+
     if surfaced:
         rows = [[p.get("company", ""),
                  f"[{p.get('title', '')}]({p.get('url', '')})",
