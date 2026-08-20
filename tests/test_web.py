@@ -62,7 +62,7 @@ def test_raw_returns_the_markdown(client):
     "/etc/passwd", "%2e%2e%2f.env",
 ])
 def test_path_traversal_is_refused(client, attack):
-    """The filename comes from the URL; a bare Path() here serves the .env."""
+    """X6. The filename comes from the URL; a bare Path() here serves the .env."""
     r = client.get(f"/raw/briefing/{attack}")
     assert r.status_code in (307, 404), r.text[:200]
     assert "AGENTS_LLM_API_KEY" not in r.text

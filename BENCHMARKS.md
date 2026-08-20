@@ -22,6 +22,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | X3 | One run, one row | each agent invocation writes exactly one `runs` row, success or failure |
 | X4 | No credential leaks | no rendered brief, run log row or API response contains the LLM key |
 | X5 | Sources are attributed | every brief with data has a Sources section or an explicit degradation saying why not |
+| X6 | The dashboard serves only its own output | five path-traversal shapes against `/raw/` return 404, and no response body contains the `.env` or `/etc/passwd` |
 
 ## 1 · Research agent
 
