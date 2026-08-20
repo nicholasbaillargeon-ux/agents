@@ -122,10 +122,11 @@ that works without a secret, so a missing key is a smaller answer, not a crash.
 Briefs are committed to `data/research-notes` on every run. Set
 `AGENTS_GIT_REMOTE` and the same commits get pushed — the agent code does not
 change, which is why the sink is a seam and not an inline `git` call inside the
-research agent. To point it at Gitea:
+research agent. Point it anywhere:
 
 ```bash
-GITEA_TOKEN=... scripts/link-gitea.sh <user> research-notes http://localhost:3000
+scripts/link-notes-remote.sh git@github.com:you/research-notes.git
+GITEA_TOKEN=... scripts/link-gitea.sh <user> research-notes  # creates the repo too
 ```
 
 A dead remote never loses a commit: the commit is already local, and the push
