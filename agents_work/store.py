@@ -109,6 +109,20 @@ def mark_new(conn: sqlite3.Connection, agent: str, items: dict[str, dict]) -> li
     return fresh
 
 
+def unseen_keys(conn: sqlite3.Connection, agent: str, keys: list[str]) -> list[str]:
+    """The keys this agent has never recorded, in the order given.
+
+    Deliberately separate from `mark_new`: an agent that can only display N of
+    them must not claim the rest, or the undisplayed ones are marked seen and
+    can never appear again.
+    """
+    if not keys:
+        return []
+    known = {row[0] for row in conn.execute(
+        "SELECT key FROM seen WHERE agent = ?", (agent,))}
+    return [k for k in keys if k not in known]
+
+
 def seen_count(conn: sqlite3.Connection, agent: str) -> int:
     return conn.execute("SELECT COUNT(*) FROM seen WHERE agent = ?", (agent,)).fetchone()[0]
 

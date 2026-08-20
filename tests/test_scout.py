@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 
 import pytest
 
@@ -257,40 +259,136 @@ def test_registry_covers_every_supported_sector():
 
 
 @pytest.mark.benchmark
-def test_verdicts_survive_a_query_string_in_the_url(ctx, fetcher):
-    """S7 (regression). Greenhouse hands back `...?gh_jid=123`. The diff keys on
-    the URL with the query stripped, so verdicts keyed on the raw URL missed
-    every row — and the brief still claimed "verdicts are model-assigned" while
-    printing a dash in each one."""
-    fetcher.route("boards/quantco/jobs", {"jobs": [{
-        "title": "Quantitative Trading Internship (Summer 2027)",
-        "location": {"name": "Chicago, IL"},
-        "absolute_url": "https://www.optiver.com/join-us/jobs/8623923002/?gh_jid=8623923002",
-        "updated_at": "2026-08-19T10:00:00Z"}]})
+def test_verdicts_attach_when_identity_lives_in_the_query_string(ctx, fetcher):
+    """S7 (regression). Six firms point every posting at one generic careers page
+    and distinguish them only by `gh_jid`. Verdicts keyed on a stripped url
+    missed every one, and the brief still claimed they were model-assigned."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": "Quantitative Trading Internship (Summer 2027)",
+         "location": {"name": "Chicago, IL"},
+         "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=7982619",
+         "updated_at": "2026-08-19T10:00:00Z"},
+        {"title": "Campus Quantitative Research Intern",
+         "location": {"name": "New York, NY"},
+         "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=7848371",
+         "updated_at": "2026-08-19T10:00:00Z"}]})
     ctx.llm.default_response = (
-        '[{"url": "https://www.optiver.com/join-us/jobs/8623923002/",'
-        ' "verdict": "apply", "why": "exactly the target role"}]')
+        '[{"url": "https://www.jumptrading.com/hr/job?gh_jid=7982619",'
+        ' "verdict": "apply", "why": "exactly the target role"},'
+        ' {"url": "https://www.jumptrading.com/hr/job?gh_jid=7848371",'
+        ' "verdict": "maybe", "why": "research rather than trading"}]')
     brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
-    assert data["verdicts"], "no verdicts parsed at all"
-    assert data["verdicts"][data["new"][0].key]["verdict"] == "apply"
+
+    assert len(data["new"]) == 2, "the two roles collapsed into one key"
+    verdicts = {p.key: data["verdicts"].get(p.key, {}).get("verdict") for p in data["new"]}
+    assert set(verdicts.values()) == {"apply", "maybe"}
     assert "exactly the target role" in brief.render()
 
 
 @pytest.mark.benchmark
-def test_verdicts_survive_the_model_re_adding_a_query_string(ctx, fetcher):
+def test_verdicts_survive_the_model_re_adding_a_tracking_parameter(ctx, fetcher):
     """S7."""
     fetcher.route("boards/quantco/jobs", {"jobs": [{
         "title": "Quant Research Intern", "location": {"name": "NYC"},
         "absolute_url": "https://x.com/jobs/1", "updated_at": "2026-08-19T10:00:00Z"}]})
     ctx.llm.default_response = (
-        '[{"url": "https://x.com/jobs/1?utm=abc", "verdict": "maybe", "why": "adjacent"}]')
+        '[{"url": "https://x.com/jobs/1/?utm_source=chat", "verdict": "maybe",'
+        ' "why": "adjacent"}]')
     _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
     assert data["verdicts"]["https://x.com/jobs/1"]["verdict"] == "maybe"
 
 
-def test_posting_key_is_the_one_canonicaliser():
+@pytest.mark.benchmark
+def test_an_ambiguous_verdict_url_is_dropped_not_guessed(ctx, fetcher):
+    """S7: attaching one role's verdict to another's row is worse than no verdict."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": "Quant Trading Intern", "location": {"name": "NYC"},
+         "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=1",
+         "updated_at": "2026-08-19T10:00:00Z"},
+        {"title": "Quant Research Intern", "location": {"name": "NYC"},
+         "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=2",
+         "updated_at": "2026-08-19T10:00:00Z"}]})
+    ctx.llm.default_response = (
+        '[{"url": "https://www.jumptrading.com/hr/job", "verdict": "apply", "why": "x"}]')
+    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
+    assert data["verdicts"] == {}
+
+
+def test_posting_key_keeps_identity_and_drops_tracking():
     from agents_work.sources.jobs import posting_key
-    assert posting_key("https://x/jobs/1?a=b#frag") == "https://x/jobs/1"
-    assert posting_key("https://x/jobs/1") == "https://x/jobs/1"
+    # identity survives
+    assert posting_key("https://j.com/hr/job?gh_jid=1") != posting_key("https://j.com/hr/job?gh_jid=2")
+    assert posting_key("https://g.com/embed?for=gemini&token=8065112") == \
+        "https://g.com/embed?for=gemini&token=8065112"
+    # tracking does not
+    assert posting_key("https://x/jobs/1?utm_source=a&gh_src=b") == "https://x/jobs/1"
+    assert posting_key("https://x/jobs/1?t=gh_src%3D&gh_jid=9") == "https://x/jobs/1?gh_jid=9"
+    # cosmetic differences do not
+    assert posting_key("https://x/jobs/1/#apply") == posting_key("https://x/jobs/1")
+    assert posting_key("https://x/j?b=2&a=1") == posting_key("https://x/j?a=1&b=2")
     assert posting_key("") == ""
-    assert Posting("C", "T", "L", "https://x/jobs/1?a=b").key == posting_key("https://x/jobs/1")
+
+
+@pytest.mark.benchmark
+def test_only_displayed_postings_are_marked_seen(ctx, fetcher):
+    """S8 (regression). `mark_new` claimed every candidate while the brief showed
+    the first `limit`. The remainder were remembered as shown without ever having
+    been, so they could never appear in any future diff — a silent cap that read
+    as "nothing new"."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+        for i in range(10)]})
+
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=False)
+    assert len(data["new"]) == 4
+    assert data["backlog"] == 6
+    assert "6 more queued for the next run" in brief.render()
+    assert seen_count(ctx.db, "scout") == 4
+
+    # the queued six are still new tomorrow, not swallowed
+    _, second = scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=False)
+    assert len(second["new"]) == 4
+    assert second["backlog"] == 2
+    third = scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=False)[1]
+    assert len(third["new"]) == 2 and third["backlog"] == 0
+    assert scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=False)[1]["new"] == []
+
+
+def test_backlog_is_silent_when_there_is_none(ctx, fetcher):
+    wire(fetcher)
+    brief, data = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
+    assert data["backlog"] == 0
+    assert "queued for the next run" not in brief.render()
+
+
+@pytest.mark.benchmark
+def test_every_displayed_row_is_ranked(ctx, fetcher):
+    """S9 (regression). The brief displayed 25 rows and asked the model about 20,
+    so five carried a dash while the summary claimed verdicts were assigned."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+        for i in range(25)]})
+    ctx.llm.default_response = json.dumps([
+        {"url": f"https://x.com/jobs/{i}", "verdict": "apply", "why": "fit"}
+        for i in range(25)])
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=25, use_llm=True)
+    assert len(data["new"]) == 25
+    unranked = [p for p in data["new"] if p.key not in data["verdicts"]]
+    assert unranked == [], f"{len(unranked)} displayed rows never reached the model"
+    assert "—" not in brief.render().split("## Coverage")[0].split("| Why |")[-1]
+
+
+@pytest.mark.benchmark
+def test_partial_ranking_is_declared(ctx, fetcher):
+    """S9: when the model genuinely answers for only some rows, say how many."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+        for i in range(4)]})
+    ctx.llm.default_response = json.dumps(
+        [{"url": "https://x.com/jobs/0", "verdict": "apply", "why": "fit"}])
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=True)
+    assert len(data["verdicts"]) == 1
+    assert "for 1 of 4 rows" in brief.render()

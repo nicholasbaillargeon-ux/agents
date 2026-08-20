@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
 from ..sources.jobs import REGISTRY, Boards, Posting, posting_key, score
-from ..store import Run, mark_new, record, seen_count
+from ..store import Run, mark_new, record, seen_count, unseen_keys
 from .base import AgentResult, Context
 
 log = logging.getLogger(__name__)
@@ -54,11 +54,15 @@ def rank(ctx: Context, postings: list[Posting], *, limit: int = 20) -> dict[str,
     for v in verdicts:
         if not isinstance(v, dict) or not v.get("url"):
             continue
-        # Normalise whatever the model echoed back; it sometimes re-adds a query
-        # string or trims a trailing slash.
+        # Canonicalise whatever the model echoed back — it re-adds tracking
+        # parameters and trailing slashes. A url that still does not resolve to
+        # a posting is dropped rather than guessed at: on the boards that put
+        # identity in the query string, a near-match would attach one role's
+        # verdict to another's row.
         key = posting_key(str(v["url"]))
         if key not in known:
-            key = next((k for k in known if k.rstrip("/") == key.rstrip("/")), key)
+            log.debug("verdict for an unrecognised url dropped: %s", v["url"])
+            continue
         out[key] = {"verdict": str(v.get("verdict", "")).lower(),
                     "why": str(v.get("why", ""))[:120]}
     return out
@@ -79,10 +83,21 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
                   if p.score >= min_score and (p.is_internship or not internships_only)]
     candidates.sort(key=lambda p: -p.score)
 
-    fresh_keys = set(mark_new(ctx.db, NAME, {p.key: p.as_dict() for p in candidates}))
-    new_postings = [p for p in candidates if p.key in fresh_keys][:limit]
+    # Claim only what this brief will actually show. Marking every candidate
+    # seen and then displaying the first `limit` of them means the remainder are
+    # remembered as shown without ever having been, and they never surface again.
+    by_key = {}
+    for p in candidates:
+        by_key.setdefault(p.key, p)
+    fresh = unseen_keys(ctx.db, NAME, list(by_key))
+    new_postings = [by_key[k] for k in fresh[:limit]]
+    backlog = len(fresh) - len(new_postings)
+    mark_new(ctx.db, NAME, {p.key: p.as_dict() for p in new_postings})
 
-    verdicts = rank(ctx, new_postings) if use_llm else {}
+    # Rank exactly what will be displayed. These two limits used to disagree —
+    # the brief showed 25 rows and asked the model about 20 — so five rows
+    # carried a dash while the summary said verdicts were model-assigned.
+    verdicts = rank(ctx, new_postings, limit=len(new_postings)) if use_llm else {}
     if new_postings:
         new_postings.sort(key=lambda p: (
             VERDICT_ORDER.get(verdicts.get(p.key, {}).get("verdict", ""), 2), -p.score))
@@ -125,7 +140,12 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     if not new_postings:
         verdict_note = "no new postings to rank this run"
     elif verdicts:
+        unranked = [p for p in new_postings if p.key not in verdicts]
         verdict_note = "verdicts are model-assigned"
+        if unranked:
+            verdict_note += (f" for {len(new_postings) - len(unranked)} of "
+                             f"{len(new_postings)} rows; the model returned nothing "
+                             f"usable for the other {len(unranked)}")
     elif not use_llm:
         verdict_note = "model ranking was switched off for this run"
     else:
@@ -135,15 +155,17 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
         f"- {len(all_postings)} postings pulled from {len(registry)} boards\n"
         f"- {len(candidates)} passed the keyword filter "
         f"(score ≥ {min_score}{', internship titles only' if internships_only else ''})\n"
-        f"- {len(new_postings)} were new; "
-        f"{seen_count(ctx.db, NAME)} postings tracked in total\n"
+        f"- {len(new_postings)} shown as new"
+        + (f", {backlog} more queued for the next run (capped at {limit} a night)"
+           if backlog else "")
+        + f"; {seen_count(ctx.db, NAME)} postings tracked in total\n"
         f"- {verdict_note.capitalize()}; scores are deterministic keyword weights."))
     brief.source("Greenhouse / Lever / Ashby public job board APIs",
                  note="each board's own feed, no scraping")
     brief.extra_meta.update({"new": len(new_postings), "scanned": len(all_postings),
-                             "candidates": len(candidates)})
+                             "candidates": len(candidates), "backlog": backlog})
     data = {"all": all_postings, "candidates": candidates, "new": new_postings,
-            "verdicts": verdicts, "status": boards.source_status}
+            "verdicts": verdicts, "status": boards.source_status, "backlog": backlog}
     return brief, data
 
 

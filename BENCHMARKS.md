@@ -68,7 +68,9 @@ Each gate names the failure it exists to prevent. Several of them were written
 | S4 | Relevance filter | recruiting/sales/legal internships score below threshold; quant/SWE internships above |
 | S5 | A dead board is reported | a board returning nothing appears in Coverage and in the degradations |
 | S6 | An empty diff does not blame the model **(regression)** | with nothing new the brief says "no new postings to rank", never "unavailable" — and a genuinely absent model still is reported |
-| S7 | Verdicts survive URL query strings **(regression)** | the diff and the verdict lookup share one canonicaliser; Greenhouse's `?gh_jid=` made every Optiver verdict miss while the brief claimed they were assigned |
+| S7 | Identity in the query string is preserved **(regression)** | six firms point every posting at one careers page and differ only by `gh_jid`/`id`/`token`; stripping the query collapsed 107 Jump Trading roles to one key. Tracking params are dropped, identifying ones kept, and an unresolvable verdict url is dropped rather than attached to the wrong row |
+| S8 | Nothing is claimed that is not shown **(regression)** | with more qualifying postings than the display cap, only the shown ones are marked seen and the brief states how many are queued |
+| S9 | Every displayed row is ranked **(regression)** | the ranking cap matches the display cap, and a genuinely partial answer says "for N of M rows" rather than leaving silent dashes |
 
 ## 5 · Personal RAG analyst
 

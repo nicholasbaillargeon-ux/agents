@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..netcache import Fetcher
 
@@ -69,14 +70,34 @@ IRRELEVANT = {
 }
 
 
-def posting_key(url: str) -> str:
-    """Canonical identity for a posting URL: no query string, no fragment.
+# Query parameters that carry no identity. Everything else is kept, because on
+# several of these boards the query string IS the identity: Databricks, Stripe,
+# Jump Trading, Squarepoint, Gemini and Old Mission all point every posting at
+# one generic careers page and distinguish them only by `gh_jid`/`id`/`token`.
+# Dropping the whole query collapsed 107 Jump Trading roles into a single key,
+# so 106 of them could never appear in a diff. Measured on the live registry:
+# gh_jid has 233 distinct values for one firm, `t` has exactly one (`gh_src=`).
+TRACKING_PARAMS = {
+    "t", "gh_src", "src", "source", "ref", "referrer", "utm_source", "utm_medium",
+    "utm_campaign", "utm_term", "utm_content",
+}
 
-    Shared rather than inlined because two places must agree on it — the nightly
-    diff and the verdict lookup. They did not, and Greenhouse's `?gh_jid=` made
-    every Optiver verdict silently miss.
+
+def posting_key(url: str) -> str:
+    """Canonical identity for a posting URL.
+
+    Shared rather than inlined because three things must agree on it — the
+    nightly diff, the verdict lookup, and the backlog accounting. Drops the
+    fragment and known tracking parameters, keeps identifying ones, and sorts
+    what remains so a board reordering its query string is not a new posting.
     """
-    return re.sub(r"[?#].*$", "", url or "")
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    kept = sorted((k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                  if k.lower() not in TRACKING_PARAMS)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"),
+                       urlencode(kept), ""))
 
 
 @dataclass
