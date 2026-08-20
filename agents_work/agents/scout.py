@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
-from ..sources.jobs import REGISTRY, Boards, Posting, score
+from ..sources.jobs import REGISTRY, Boards, Posting, posting_key, score
 from ..store import Run, mark_new, record, seen_count
 from .base import AgentResult, Context
 
@@ -40,7 +40,9 @@ def rank(ctx: Context, postings: list[Posting], *, limit: int = 20) -> dict[str,
     the deterministic score already ordered the list."""
     if not postings or not ctx.llm.available:
         return {}
-    lines = [f"- url: {p.url}\n  company: {p.company}\n  title: {p.title}\n"
+    # Send the canonical key, not the raw URL: the verdicts come back keyed by
+    # whatever was sent, and the caller looks them up by key.
+    lines = [f"- url: {p.key}\n  company: {p.company}\n  title: {p.title}\n"
              f"  location: {p.location}" for p in postings[:limit]]
     verdicts = ctx.llm.json(
         "Postings:\n" + "\n".join(lines), system=SYSTEM, fast=True,
@@ -48,10 +50,17 @@ def rank(ctx: Context, postings: list[Posting], *, limit: int = 20) -> dict[str,
     if not isinstance(verdicts, list):
         return {}
     out = {}
+    known = {p.key for p in postings}
     for v in verdicts:
-        if isinstance(v, dict) and v.get("url"):
-            out[v["url"]] = {"verdict": str(v.get("verdict", "")).lower(),
-                             "why": str(v.get("why", ""))[:120]}
+        if not isinstance(v, dict) or not v.get("url"):
+            continue
+        # Normalise whatever the model echoed back; it sometimes re-adds a query
+        # string or trims a trailing slash.
+        key = posting_key(str(v["url"]))
+        if key not in known:
+            key = next((k for k in known if k.rstrip("/") == key.rstrip("/")), key)
+        out[key] = {"verdict": str(v.get("verdict", "")).lower(),
+                    "why": str(v.get("why", ""))[:120]}
     return out
 
 

@@ -1,9 +1,16 @@
 """Job boards: Greenhouse, Lever, Ashby.
 
-The board slugs below were each verified to return HTTP 200 on 2026-08-20. They
+The board slugs below were each verified to return postings on 2026-08-20. They
 rot — firms move ATS vendors — so `Boards.fetch_all` reports which sources
 answered and which came back empty, and an empty board is a logged event rather
 than a silently shorter result list.
+
+That reporting earned its keep on day one: Optiver had moved from the
+`optiver` board to `optiverus`, and Plaid had left Lever for Ashby entirely.
+Both showed up as "no postings returned" in the brief rather than as twenty
+boards quietly becoming eighteen. `tests/test_boards_live.py` re-checks every
+slug against the real APIs (`AGENTS_LIVE=1 pytest -m live`) so the next
+migration is a failing test rather than a silent gap.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ REGISTRY: tuple[tuple[str, str, str, str], ...] = (
     ("greenhouse", "janestreet", "Jane Street", "quant"),
     ("greenhouse", "jumptrading", "Jump Trading", "quant"),
     ("greenhouse", "imc", "IMC Trading", "quant"),
-    ("greenhouse", "optiver", "Optiver", "quant"),
+    ("greenhouse", "optiverus", "Optiver", "quant"),   # moved from "optiver" 2026-08
     ("greenhouse", "akunacapital", "Akuna Capital", "quant"),
     ("greenhouse", "oldmissioncapital", "Old Mission Capital", "quant"),
     ("greenhouse", "virtu", "Virtu Financial", "quant"),
@@ -39,8 +46,8 @@ REGISTRY: tuple[tuple[str, str, str, str], ...] = (
     ("greenhouse", "databricks", "Databricks", "ai"),
     ("greenhouse", "scaleai", "Scale AI", "ai"),
     ("greenhouse", "figma", "Figma", "ai"),
-    ("lever", "plaid", "Plaid", "fintech"),
     ("ashby", "ramp", "Ramp", "fintech"),
+    ("ashby", "plaid", "Plaid", "fintech"),           # left Lever for Ashby 2026-08
     ("ashby", "openai", "OpenAI", "ai"),
 )
 
@@ -62,6 +69,16 @@ IRRELEVANT = {
 }
 
 
+def posting_key(url: str) -> str:
+    """Canonical identity for a posting URL: no query string, no fragment.
+
+    Shared rather than inlined because two places must agree on it — the nightly
+    diff and the verdict lookup. They did not, and Greenhouse's `?gh_jid=` made
+    every Optiver verdict silently miss.
+    """
+    return re.sub(r"[?#].*$", "", url or "")
+
+
 @dataclass
 class Posting:
     company: str
@@ -78,7 +95,7 @@ class Posting:
     def key(self) -> str:
         """Stable identity for the nightly diff. The URL carries the ATS id;
         titles and locations get edited in place and would false-positive."""
-        return re.sub(r"[?#].*$", "", self.url) or f"{self.company}:{self.title}"
+        return posting_key(self.url) or f"{self.company}:{self.title}"
 
     @property
     def is_internship(self) -> bool:

@@ -236,3 +236,61 @@ def test_switching_the_model_off_says_so(ctx, fetcher):
     wire(fetcher)
     brief, _ = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
     assert "switched off" in brief.render()
+
+
+# -- registry hygiene (no network) -------------------------------------------
+
+def test_registry_is_well_formed():
+    from agents_work.sources.jobs import REGISTRY as LIVE
+    assert len(LIVE) >= 15
+    assert all(vendor in ("greenhouse", "lever", "ashby") for vendor, *_ in LIVE)
+    assert all(company and sector for *_, company, sector in LIVE)
+    keys = [(vendor, slug) for vendor, slug, *_ in LIVE]
+    assert len(keys) == len(set(keys)), "duplicate board in the registry"
+    names = [company for *_, company, _ in LIVE]
+    assert len(names) == len(set(names)), "duplicate company in the registry"
+
+
+def test_registry_covers_every_supported_sector():
+    from agents_work.sources.jobs import REGISTRY as LIVE
+    assert {sector for *_, sector in LIVE} == {"quant", "fintech", "ai"}
+
+
+@pytest.mark.benchmark
+def test_verdicts_survive_a_query_string_in_the_url(ctx, fetcher):
+    """S7 (regression). Greenhouse hands back `...?gh_jid=123`. The diff keys on
+    the URL with the query stripped, so verdicts keyed on the raw URL missed
+    every row — and the brief still claimed "verdicts are model-assigned" while
+    printing a dash in each one."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [{
+        "title": "Quantitative Trading Internship (Summer 2027)",
+        "location": {"name": "Chicago, IL"},
+        "absolute_url": "https://www.optiver.com/join-us/jobs/8623923002/?gh_jid=8623923002",
+        "updated_at": "2026-08-19T10:00:00Z"}]})
+    ctx.llm.default_response = (
+        '[{"url": "https://www.optiver.com/join-us/jobs/8623923002/",'
+        ' "verdict": "apply", "why": "exactly the target role"}]')
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
+    assert data["verdicts"], "no verdicts parsed at all"
+    assert data["verdicts"][data["new"][0].key]["verdict"] == "apply"
+    assert "exactly the target role" in brief.render()
+
+
+@pytest.mark.benchmark
+def test_verdicts_survive_the_model_re_adding_a_query_string(ctx, fetcher):
+    """S7."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [{
+        "title": "Quant Research Intern", "location": {"name": "NYC"},
+        "absolute_url": "https://x.com/jobs/1", "updated_at": "2026-08-19T10:00:00Z"}]})
+    ctx.llm.default_response = (
+        '[{"url": "https://x.com/jobs/1?utm=abc", "verdict": "maybe", "why": "adjacent"}]')
+    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
+    assert data["verdicts"]["https://x.com/jobs/1"]["verdict"] == "maybe"
+
+
+def test_posting_key_is_the_one_canonicaliser():
+    from agents_work.sources.jobs import posting_key
+    assert posting_key("https://x/jobs/1?a=b#frag") == "https://x/jobs/1"
+    assert posting_key("https://x/jobs/1") == "https://x/jobs/1"
+    assert posting_key("") == ""
+    assert Posting("C", "T", "L", "https://x/jobs/1?a=b").key == posting_key("https://x/jobs/1")
