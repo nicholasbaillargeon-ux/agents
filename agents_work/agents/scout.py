@@ -110,14 +110,25 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
         [[company, next((s for v, sl, c, s in registry if c == company), ""), status]
          for company, status in sorted(boards.source_status.items())]))
 
+    # Why there are no verdicts matters. "Unavailable" when the real reason is
+    # "nothing new to rank" is the brief crying wolf about its own model, and a
+    # warning that fires on a healthy run stops being read.
+    if not new_postings:
+        verdict_note = "no new postings to rank this run"
+    elif verdicts:
+        verdict_note = "verdicts are model-assigned"
+    elif not use_llm:
+        verdict_note = "model ranking was switched off for this run"
+    else:
+        verdict_note = "model ranking was unavailable this run"
+
     brief.add("How this was filtered", (
         f"- {len(all_postings)} postings pulled from {len(registry)} boards\n"
         f"- {len(candidates)} passed the keyword filter "
         f"(score ≥ {min_score}{', internship titles only' if internships_only else ''})\n"
         f"- {len(new_postings)} were new; "
         f"{seen_count(ctx.db, NAME)} postings tracked in total\n"
-        f"- Verdicts are model-assigned{'' if verdicts else ' — unavailable this run'}; "
-        "scores are deterministic keyword weights."))
+        f"- {verdict_note.capitalize()}; scores are deterministic keyword weights."))
     brief.source("Greenhouse / Lever / Ashby public job board APIs",
                  note="each board's own feed, no scraping")
     brief.extra_meta.update({"new": len(new_postings), "scanned": len(all_postings),

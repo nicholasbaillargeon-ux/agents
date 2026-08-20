@@ -205,3 +205,34 @@ def test_run_writes_an_artifact_and_records_the_run(ctx, fetcher):
     assert res.artifact.is_file()
     assert res.data["scanned"] == 3
     assert "3 new" in res.summary
+
+
+@pytest.mark.benchmark
+def test_an_empty_diff_does_not_blame_the_model(ctx, fetcher):
+    """S6 (regression). With nothing new the brief said model verdicts were
+    "unavailable this run". The model was fine; there was nothing to rank, and a
+    warning that fires on a healthy run stops being read."""
+    wire(fetcher)
+    scout.build_brief(ctx, registry=REGISTRY, use_llm=True)      # seeds the diff
+    brief, data = scout.build_brief(ctx, registry=REGISTRY, use_llm=True)
+    text = brief.render()
+    assert data["new"] == []
+    assert "unavailable" not in text
+    assert "No new postings to rank" in text
+
+
+def test_a_genuinely_absent_model_is_still_reported(cfg, ctx, fetcher):
+    """S6: the real failure must survive the fix for the false one."""
+    from agents_work.llm import FakeLLM
+    ctx.llm = FakeLLM(cfg, available=False)
+    wire(fetcher)
+    brief, data = scout.build_brief(ctx, registry=REGISTRY, use_llm=True)
+    assert data["new"]
+    assert "Model ranking was unavailable this run" in brief.render()
+
+
+def test_switching_the_model_off_says_so(ctx, fetcher):
+    """S6."""
+    wire(fetcher)
+    brief, _ = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
+    assert "switched off" in brief.render()
