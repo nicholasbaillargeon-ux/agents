@@ -30,6 +30,15 @@ _RATE_LIMITS = {
     "boards-api.greenhouse.io": 0.20,
     "api.lever.co": 0.20,
     "api.ashbyhq.com": 0.20,
+    "api.smartrecruiters.com": 0.20,
+}
+# Workday and Oracle each serve one tenant per host, so a per-host limit is
+# already a per-employer limit; these are courtesy values for hosts that
+# publish none.
+_HOST_SUFFIX_LIMITS = {
+    ".myworkdayjobs.com": 0.30,
+    ".oraclecloud.com": 0.30,
+    ".eightfold.ai": 0.30,
 }
 _DEFAULT_RATE = 0.10
 
@@ -37,8 +46,17 @@ _lock = threading.Lock()
 _last_call: dict[str, float] = {}
 
 
+def _rate_for(host: str) -> float:
+    if host in _RATE_LIMITS:
+        return _RATE_LIMITS[host]
+    for suffix, delay in _HOST_SUFFIX_LIMITS.items():
+        if host.endswith(suffix):
+            return delay
+    return _DEFAULT_RATE
+
+
 def _throttle(host: str) -> None:
-    delay = _RATE_LIMITS.get(host, _DEFAULT_RATE)
+    delay = _rate_for(host)
     with _lock:
         prev = _last_call.get(host, 0.0)
         wait = delay - (time.monotonic() - prev)
@@ -78,8 +96,14 @@ class Fetcher:
         self.offline = offline
         self.stats = {"hit": 0, "miss": 0, "error": 0}
 
-    def _key(self, url: str, headers: dict | None) -> Path:
-        h = hashlib.sha256((url + json.dumps(headers or {}, sort_keys=True)).encode()).hexdigest()[:24]
+    def _key(self, url: str, headers: dict | None, body: dict | None = None) -> Path:
+        # The body is part of the identity: two Workday pages differ only by the
+        # `offset` in their POST payload, and a key that ignored it would serve
+        # page 1 for every page of a paginated board.
+        material = url + json.dumps(headers or {}, sort_keys=True)
+        if body is not None:
+            material += json.dumps(body, sort_keys=True)
+        h = hashlib.sha256(material.encode()).hexdigest()[:24]
         return self.cache_dir / f"{h}.json"
 
     def _read_cache(self, path: Path, ttl: int) -> Response | None:
@@ -101,11 +125,19 @@ class Fetcher:
         tmp.replace(path)
 
     def fetch(self, url: str, *, headers: dict | None = None, ttl: int | None = None,
-              params: dict | None = None) -> Response | None:
+              params: dict | None = None, body: dict | None = None) -> Response | None:
+        """GET `url`, or POST `body` to it when `body` is given.
+
+        Workday and Oracle publish their job boards behind POST-only JSON
+        endpoints, so "cache-first GET" had to grow a body rather than every
+        caller growing its own client — the throttle, the on-disk cache and the
+        stale-on-failure fallback are the parts that matter, and they are the
+        same either way.
+        """
         if params:
             url = str(httpx.URL(url).copy_merge_params(params))
         ttl = self.ttl if ttl is None else ttl
-        path = self._key(url, headers)
+        path = self._key(url, headers, body)
 
         cached = self._read_cache(path, ttl)
         if cached is not None:
@@ -126,7 +158,8 @@ class Fetcher:
         _throttle(httpx.URL(url).host)
         try:
             with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-                r = client.get(url, headers=hdrs)
+                r = (client.post(url, headers=hdrs, json=body) if body is not None
+                     else client.get(url, headers=hdrs))
             resp = Response(url, r.status_code, r.text)
         except httpx.HTTPError as e:
             log.warning("fetch failed %s: %s", url, e)

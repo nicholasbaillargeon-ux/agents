@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 import pytest
@@ -153,12 +154,14 @@ def test_mark_new_returns_only_the_new_keys(ctx):
 
 @pytest.mark.benchmark
 def test_a_dead_board_is_reported_not_silently_dropped(ctx, fetcher):
-    """S5: board slugs rot when firms change ATS vendor."""
+    """S5: board slugs rot when firms change ATS vendor. A board that answers
+    with an empty list is the shape that migration takes -- the old slug keeps
+    resolving for a while and simply has nothing on it."""
     wire(fetcher)
-    fetcher.route("postings/fintechco", None)
+    fetcher.route("postings/fintechco", [])
     brief, data = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
     assert data["status"]["FintechCo"] == "no postings returned"
-    assert any("returned nothing" in d for d in brief.degradations)
+    assert any("contributed nothing" in d for d in brief.degradations)
     assert "FintechCo" in brief.render()
 
 
@@ -246,9 +249,10 @@ def test_switching_the_model_off_says_so(ctx, fetcher):
 # -- registry hygiene (no network) -------------------------------------------
 
 def test_registry_is_well_formed():
-    from agents_work.sources.jobs import REGISTRY as LIVE
+    from agents_work.sources.jobs import REGISTRY as LIVE, SECTORS, VENDORS
     assert len(LIVE) >= 15
-    assert all(vendor in ("greenhouse", "lever", "ashby") for vendor, *_ in LIVE)
+    assert all(vendor in VENDORS for vendor, *_ in LIVE)
+    assert all(sector in SECTORS for *_, sector in LIVE)
     assert all(company and sector for *_, company, sector in LIVE)
     keys = [(vendor, slug) for vendor, slug, *_ in LIVE]
     assert len(keys) == len(set(keys)), "duplicate board in the registry"
@@ -256,9 +260,46 @@ def test_registry_is_well_formed():
     assert len(names) == len(set(names)), "duplicate company in the registry"
 
 
-def test_registry_covers_every_supported_sector():
+@pytest.mark.parametrize("vendor,parts,shape", [
+    ("workday", 3, "tenant/wdN/Site"),
+    ("oracle", 2, "host/siteNumber"),
+    ("eightfold", 2, "sub/domain"),
+])
+def test_compound_slugs_have_the_shape_their_adapter_expects(vendor, parts, shape):
+    """A registry typo in one of these reads as a dead board on the night it
+    lands, not at import; the adapters raise on the wrong shape and this is the
+    check that runs without the network."""
     from agents_work.sources.jobs import REGISTRY as LIVE
-    assert {sector for *_, sector in LIVE} == {"quant", "fintech", "ai"}
+    rows = [(slug, company) for v, slug, company, _ in LIVE if v == vendor]
+    assert rows, f"no {vendor} boards left in the registry"
+    for slug, company in rows:
+        assert len(slug.split("/")) == parts, f"{company}: {slug!r} is not {shape}"
+
+
+@pytest.mark.benchmark
+def test_registry_covers_every_sector_it_claims_to():
+    """S13: the point of the expansion is that banks, brokers, exchanges and
+    enterprise IT are all reachable, not just the quant/fintech/AI startups the
+    original three vendors happened to cover."""
+    from agents_work.sources.jobs import REGISTRY as LIVE
+    sectors = {sector for *_, sector in LIVE}
+    assert {"quant", "fintech", "ai", "bank", "broker", "exchange",
+            "enterprise"} <= sectors
+    # every sector has enough boards to survive one of them going dark
+    for sector in sectors:
+        assert sum(1 for *_, s in LIVE if s == sector) >= 2, f"{sector} has one board"
+
+
+@pytest.mark.benchmark
+def test_cantor_fitzgerald_and_its_adjacent_desks_are_covered():
+    """S13: the user asked for Cantor Fitzgerald and firms like it by name, and
+    none of them is on Greenhouse/Lever/Ashby -- they are the reason the Oracle
+    and Workday adapters exist."""
+    from agents_work.sources.jobs import REGISTRY as LIVE
+    names = {company for *_, company, _ in LIVE}
+    assert any("Cantor" in n for n in names)
+    brokers = {c for _, _, c, s in LIVE if s in ("broker", "bank", "exchange")}
+    assert len(brokers) >= 6, brokers
 
 
 @pytest.mark.benchmark
@@ -546,3 +587,374 @@ def test_the_shortlist_is_absent_when_nothing_is_worth_applying_to(ctx, fetcher)
         [{"url": "https://jobs.ashbyhq.com/aico/1", "verdict": "skip", "why": "no"}])
     brief, _ = scout.build_brief(ctx, registry=REGISTRY, use_llm=True)
     assert "Worth applying to" not in brief.render()
+
+
+# -- days open ---------------------------------------------------------------
+
+def _gh_dated(first_published, updated="2026-08-20T10:00:00Z", n=1):
+    return {"jobs": [{"title": f"Quantitative Trading Intern {i}",
+                      "location": {"name": "New York, NY"},
+                      "absolute_url": f"https://x.com/jobs/{i}",
+                      "first_published": first_published, "updated_at": updated}
+                     for i in range(n)]}
+
+
+@pytest.mark.benchmark
+def test_days_open_counts_from_first_publication_not_last_edit(ctx, fetcher):
+    """S14: `updated_at` moves every time a recruiter touches the requisition.
+    Reading the age off it would reset the clock on a role that has been open
+    since March and report it as posted today -- the exact opposite of what the
+    column is for."""
+    fetcher.route("boards/quantco/jobs",
+                  _gh_dated("2026-03-01T09:00:00Z", updated="2026-08-20T10:00:00Z"))
+    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
+    assert data["new"][0].posted == "2026-03-01"
+    assert data["new"][0].days_open > 150
+
+
+@pytest.mark.benchmark
+def test_the_brief_shows_how_long_each_posting_has_been_open(ctx, fetcher):
+    """S15: the column the shortlist and the table both carry."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date()
+    fetcher.route("boards/quantco/jobs", _gh_dated(today.isoformat()))
+    ctx.llm.default_response = json.dumps(
+        [{"url": "https://x.com/jobs/0", "verdict": "apply", "why": "fit"}])
+    brief, _ = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
+    text = brief.render()
+    assert "Days open" in text
+    assert "posted today" in text        # shortlist phrasing
+    assert "| 0 |" in text               # table cell
+
+
+def test_an_undated_posting_says_so_rather_than_claiming_zero(ctx, fetcher):
+    """A blank cell in a numeric column reads as zero, and zero is a claim."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": "Quantitative Trading Intern", "location": {"name": "NYC"},
+         "absolute_url": "https://x.com/jobs/1"}]})
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
+    assert data["new"][0].posted == ""
+    assert data["new"][0].days_open is None
+    assert "—" in brief.render()
+    assert "publishes none" in brief.render()
+
+
+@pytest.mark.parametrize("phrase,expected_days,floor", [
+    ("Posted Today", 0, False),
+    ("Posted Yesterday", 1, False),
+    ("Posted 7 Days Ago", 7, False),
+    ("Posted 30+ Days Ago", 30, True),
+    ("", None, False),
+])
+def test_workdays_relative_age_becomes_a_real_date(phrase, expected_days, floor):
+    """Workday publishes a bucket, not a date. Storing the phrase would leave a
+    posting reading '30+ days' forever; storing the date it implies keeps
+    ageing."""
+    from datetime import date
+    from agents_work.sources.jobs import days_open, workday_posted
+    today = date(2026, 8, 20)
+    posted, is_floor = workday_posted(phrase, today)
+    assert is_floor is floor
+    assert days_open(posted, today) == expected_days
+
+
+def test_a_floored_age_is_rendered_as_a_floor():
+    from datetime import date
+    from agents_work.sources.jobs import format_days_open
+    today = date(2026, 8, 20)
+    assert format_days_open("2026-07-21", True, today) == "30+"
+    assert format_days_open("2026-07-21", False, today) == "30"
+    assert format_days_open("", False, today) == "—"
+
+
+@pytest.mark.benchmark
+def test_the_freshest_posting_wins_the_last_slot_when_the_cap_binds(ctx, fetcher):
+    """S16: after a registry change the display cap binds for several nights.
+    Among equally-scoring postings the one that opened yesterday is the one
+    worth reading tonight; the older one keeps its place in the queue."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": "Quantitative Trading Intern old", "location": {"name": "NYC"},
+         "absolute_url": "https://x.com/jobs/old",
+         "first_published": "2025-01-01T00:00:00Z"},
+        {"title": "Quantitative Trading Intern new", "location": {"name": "NYC"},
+         "absolute_url": "https://x.com/jobs/new",
+         "first_published": "2026-08-19T00:00:00Z"}]})
+    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=1, use_llm=False)
+    assert [p.title for p in data["new"]] == ["Quantitative Trading Intern new"]
+    assert data["backlog"] == 1
+    # and the older one is still there tomorrow rather than swallowed
+    _, second = scout.build_brief(ctx, registry=REGISTRY[:1], limit=1, use_llm=False)
+    assert [p.title for p in second["new"]] == ["Quantitative Trading Intern old"]
+
+
+# -- the vendors added for banks, brokers and enterprise IT -------------------
+
+WORKDAY_URL = "wday/cxs/acme/Careers/jobs"
+ORACLE_URL = "recruitingCEJobRequisitions"
+EIGHTFOLD_URL = "eightfold.ai/api/apply"
+
+
+def test_workday_boards_parse_and_paginate(ctx, fetcher):
+    """Workday hands out twenty postings a request, so a board of thirty is two
+    requests and a parser that stopped at the first would lose a third of it."""
+    from agents_work.sources.jobs import Boards
+    page1 = {"total": 30, "jobPostings": [
+        {"title": f"Software Engineer Intern {i}", "locationsText": "New York",
+         "externalPath": f"/job/NY/SWE-Intern-{i}_R{i}", "postedOn": "Posted 3 Days Ago"}
+        for i in range(20)]}
+    page2 = {"total": 30, "jobPostings": [
+        {"title": f"Software Engineer Intern {i}", "locationsText": "New York",
+         "externalPath": f"/job/NY/SWE-Intern-{i}_R{i}", "postedOn": "Posted Today"}
+        for i in range(20, 30)]}
+    fetcher.route(WORKDAY_URL + '|{"appliedFacets": {}, "limit": 20, "offset": 0', page1)
+    fetcher.route(WORKDAY_URL + '|{"appliedFacets": {}, "limit": 20, "offset": 20', page2)
+    got = Boards(fetcher).fetch_all((("workday", "acme/wd1/Careers", "Acme", "bank"),))
+    assert len(got) == 30
+    assert got[0].url.startswith("https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/")
+    assert got[0].days_open == 3
+
+
+def test_a_workday_board_too_big_to_sweep_says_so(ctx, fetcher):
+    """A truncated board that reports itself as complete is the silent cap this
+    codebase keeps refusing to ship."""
+    from agents_work.sources.jobs import Boards
+    big = {"total": 2000, "jobPostings": [
+        {"title": "Quant Intern", "locationsText": "NY",
+         "externalPath": "/job/NY/Quant-Intern_R1", "postedOn": "Posted Today"}]}
+    boards = Boards(fetcher)
+    fetcher.route(WORKDAY_URL, big)
+    boards.fetch_all((("workday", "acme/wd1/Careers", "Acme", "bank"),))
+    assert "early-career search of 2000" in boards.source_status["Acme"]
+
+
+def test_oracle_boards_parse(ctx, fetcher):
+    """Cantor Fitzgerald, BGC and Lazard all live here."""
+    from agents_work.sources.jobs import Boards
+    fetcher.route(ORACLE_URL, {"items": [{"TotalJobsCount": 2, "requisitionList": [
+        {"Id": "249697", "Title": "2027 Summer Analyst - Technology",
+         "PrimaryLocation": "New York, NY, United States", "PostedDate": "2026-08-18"},
+        {"Id": "249698", "Title": "Senior Broker", "PrimaryLocation": "London",
+         "PostedDate": "2026-08-19"}]}]})
+    got = Boards(fetcher).fetch_all(
+        (("oracle", "h.oraclecloud.com/CX_1003", "Cantor Fitzgerald / BGC", "broker"),))
+    assert [p.title for p in got] == ["2027 Summer Analyst - Technology", "Senior Broker"]
+    assert got[0].url.endswith("/sites/CX_1003/job/249697")
+    assert got[0].posted == "2026-08-18"
+    assert got[0].is_internship, "'2027 Summer Analyst' is how a bank says intern"
+
+
+def test_eightfold_boards_parse(ctx, fetcher):
+    from agents_work.sources.jobs import Boards
+    fetcher.route(EIGHTFOLD_URL, {"count": 1, "positions": [
+        {"name": "Quantitative Developer Intern", "location": "New York",
+         "canonicalPositionUrl": "https://mlp.eightfold.ai/careers/job/7559",
+         "t_create": 1_755_000_000}]})
+    got = Boards(fetcher).fetch_all((("eightfold", "mlp/mlp.com", "Millennium", "quant"),))
+    assert len(got) == 1 and got[0].posted == "2025-08-12"
+
+
+def test_smartrecruiters_boards_parse(ctx, fetcher):
+    from agents_work.sources.jobs import Boards
+    fetcher.route("smartrecruiters.com/v1/companies", {"totalFound": 1, "content": [
+        {"id": "7439", "name": "Technology Analyst Programme",
+         "releasedDate": "2026-08-01T09:00:00.000Z",
+         "location": {"city": "London", "region": "England", "country": "gb"}}]})
+    got = Boards(fetcher).fetch_all((("smartrecruiters", "acme", "Acme", "bank"),))
+    assert got[0].url == "https://jobs.smartrecruiters.com/acme/7439"
+    assert got[0].location == "London, England, gb"
+    assert got[0].posted == "2026-08-01"
+
+
+@pytest.mark.parametrize("vendor,slug", [
+    ("workday", "acme"), ("oracle", "host"), ("eightfold", "sub")])
+def test_a_malformed_compound_slug_fails_that_board_only(ctx, fetcher, vendor, slug):
+    from agents_work.sources.jobs import Boards
+    boards = Boards(fetcher)
+    wire(fetcher)
+    got = boards.fetch_all(((vendor, slug, "Acme", "bank"),) + REGISTRY)
+    assert boards.source_status["Acme"].startswith("error: ValueError")
+    assert len(got) == 3, "the other boards still answered"
+
+
+# -- scoring -----------------------------------------------------------------
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("title", [
+    "Retail Sales Intern",           # "ai" inside "Retail"
+    "HTML Email Marketing Intern",   # "ml" inside "HTML"
+    "Maintenance Technician Intern",  # "ai" inside "Maintenance"
+    "Chair of the Audit Committee",
+])
+def test_short_keywords_do_not_match_inside_other_words(title):
+    """S17 (regression). Scoring was a substring test, and the two-letter
+    entries -- "ai" and "ml", worth two points each -- matched inside "Retail",
+    "HTML", "Maintenance" and "Chair". The false positives landed on exactly the
+    weights that decide whether a posting is worth spending a model call on."""
+    p = Posting(company="X", title=title, location="", url="u")
+    score(p)
+    assert not any(r.endswith((" ai", " ml")) for r in p.reasons), p.reasons
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("title", ["Retail Sales Intern", "HTML Email Marketing Intern"])
+def test_a_phantom_keyword_no_longer_lifts_a_posting_over_the_bar(title):
+    """S17: the substring match was worth enough on its own to carry an
+    irrelevant posting past the score >= 4 gate and into the model's batch."""
+    p = Posting(company="X", title=title, location="", url="u")
+    score(p)
+    assert p.score < 4, f"{title} scored {p.score} ({p.reasons})"
+
+
+def test_c_plus_plus_still_matches_despite_the_word_boundaries():
+    p = Posting(company="X", title="C++ Developer Intern", location="", url="u")
+    score(p)
+    assert any("c++" in r for r in p.reasons), p.reasons
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("title,wanted", [
+    ("2027 Engineering Summer Analyst", True),
+    ("Technology Analyst Program - 2027", True),
+    ("Global Markets Graduate Programme", True),
+    ("Off-Cycle Analyst - Quantitative Research", True),
+    ("Early Career Software Engineer", True),
+    ("Senior Equity Research Analyst", False),
+    ("Analyst, Investment Banking", False),
+    ("Vice President, Technology", False),
+])
+def test_bank_shaped_internship_titles_are_recognised(title, wanted):
+    """S18: banks and brokers do not say "intern". Getting this wrong in either
+    direction is costly -- miss it and Cantor Fitzgerald contributes nothing,
+    over-match it and every senior analyst in the firm lands in the brief."""
+    assert Posting(company="X", title=title, location="", url="u").is_internship is wanted
+
+
+# -- board health, continued -------------------------------------------------
+
+def test_a_failed_request_is_not_reported_as_a_dead_board(ctx, fetcher):
+    """S19: an empty board and a failed request produced the same status, and
+    that status was "no postings returned" -- the one that means "this firm has
+    moved ATS vendor, go probe candidates". Naming the failure is the difference
+    between a retry tomorrow and an afternoon spent probing firms that never
+    went anywhere."""
+    from agents_work.sources.jobs import Boards
+    wire(fetcher)
+    fetcher.route("postings/fintechco", None)                     # request fails
+    fetcher.route("job-board/aico", {"jobs": []})                 # board is empty
+    boards = Boards(fetcher)
+    boards.fetch_all(REGISTRY)
+    assert boards.source_status["FintechCo"] == "unreachable (network or timeout)"
+    assert boards.source_status["AICo"] == "no postings returned"
+
+    brief, _ = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
+    degradation = next(d for d in brief.degradations if "contributed nothing" in d)
+    assert "FintechCo (unreachable" in degradation
+    assert "AICo (no postings returned)" in degradation
+
+
+def test_an_http_error_names_its_status(ctx, fetcher):
+    """S19: a 429 is a rate limit and a 404 is a moved slug. Same empty result,
+    different fix."""
+    from agents_work.sources.jobs import Boards
+    wire(fetcher)
+    fetcher.route("boards/quantco/jobs", "rate limited", 429)
+    boards = Boards(fetcher)
+    boards.fetch_all(REGISTRY)
+    assert boards.source_status["QuantCo"] == "HTTP 429"
+
+
+@pytest.mark.benchmark
+def test_a_transient_failure_is_retried_before_the_board_is_written_off(ctx, fetcher):
+    """S19: one retry rescues the timeout without hiding the migration -- a
+    board that is genuinely gone fails both attempts and still reports."""
+    from agents_work.sources.jobs import Boards
+    calls = {"n": 0}
+    real = fetcher.fetch
+
+    def flaky(url, **kw):
+        if "boards/quantco/jobs" in url:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+        return real(url, **kw)
+
+    wire(fetcher)
+    fetcher.fetch = flaky
+    boards = Boards(fetcher)
+    got = boards.fetch_all(REGISTRY[:1])
+    assert calls["n"] == 2, "the first failure was never retried"
+    assert boards.source_status["QuantCo"] == "1 postings"
+    assert len(got) == 1
+
+
+# -- ranking budget ----------------------------------------------------------
+
+@pytest.mark.benchmark
+def test_the_token_budget_covers_the_urls_the_model_must_echo(ctx, cfg, monkeypatch):
+    """S10 (regression). The budget was a flat 80 tokens a verdict, fitted to
+    Greenhouse urls. Workday and Oracle urls run past a hundred characters and
+    the model echoes each one back, so on the first live sweep three batches
+    blew the 2000-token cap, truncated mid-array and parsed as nothing -- 75
+    postings displayed with no verdict at all."""
+    long_url = ("https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite"
+                "/job/US-CA-Santa-Clara/Senior-Deep-Learning-Software-Engineer-Intern"
+                "-Summer-2027_JR1998877")
+    short = [Posting("C", f"T{i}", "L", f"https://x/{i}") for i in range(25)]
+    long = [Posting("C", f"T{i}", "L", f"{long_url}{i}") for i in range(25)]
+    assert scout.rank_budget(long) > scout.rank_budget(short)
+    # the ceiling must clear the urls themselves with the verdicts still to
+    # write, and urls tokenise at roughly two characters a token, not four
+    assert scout.rank_budget(long) > sum(len(p.key) for p in long) // 2
+
+    seen = {}
+    from agents_work.llm import FakeLLM
+    ctx.llm = FakeLLM(cfg, ["[]"])
+    real = ctx.llm.json
+    monkeypatch.setattr(ctx.llm, "json",
+                        lambda prompt, **kw: seen.update(kw) or real(prompt, **kw))
+    scout.rank(ctx, long)
+    assert seen["max_tokens"] == scout.rank_budget(long)
+
+
+@pytest.mark.benchmark
+def test_a_board_that_reports_a_caveat_is_not_counted_as_dead(ctx, fetcher):
+    """S19 (regression). The health check was `status.endswith("postings")`, and
+    the moment a status grew a caveat -- "271 postings (early-career search of
+    1859)" -- seven perfectly healthy boards were named in the degradation line
+    as having returned nothing, in a brief that listed their postings two
+    sections above."""
+    from agents_work.sources.jobs import Boards
+    wire(fetcher)
+    boards = Boards(fetcher)
+    boards.source_status = {"BigCo": "271 postings (early-career search of 1859)",
+                            "OldCo": "no postings returned"}
+    dead = {c: s for c, s in boards.source_status.items()
+            if not re.match(r"\d+ postings", s)}
+    assert dead == {"OldCo": "no postings returned"}
+
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": f"Quantitative Trading Intern {i}", "location": {"name": "NYC"},
+         "absolute_url": f"https://x.com/jobs/{i}",
+         "first_published": "2026-08-19T00:00:00Z"} for i in range(3)]})
+    brief, _ = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
+    assert not any("contributed nothing" in d for d in brief.degradations), \
+        brief.degradations
+
+
+def test_the_sources_line_names_the_vendors_actually_swept(ctx, fetcher):
+    """A hard-coded vendor list drifts the moment the registry does, and a brief
+    that cites a feed it never read is worse than one that cites fewer."""
+    wire(fetcher)
+    brief, _ = scout.build_brief(ctx, registry=REGISTRY, use_llm=False)
+    cited = next(s.label for s in brief.sources if "job board" in s.label)
+    assert "Greenhouse" in cited and "Lever" in cited and "Ashby" in cited
+    assert "Workday" not in cited, "no Workday board is in this registry"
+
+
+def test_every_vendor_the_registry_uses_has_an_adapter_and_a_label():
+    from agents_work.sources.jobs import REGISTRY as LIVE, VENDOR_LABELS, VENDORS
+    used = {v for v, *_ in LIVE}
+    assert used <= set(VENDORS)
+    assert used <= set(VENDOR_LABELS)
+    # and no adapter is carried for a vendor nothing uses
+    assert used == set(VENDORS), f"unused adapters: {set(VENDORS) - used}"

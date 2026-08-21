@@ -1,6 +1,6 @@
 """Live check that every board slug in the registry still resolves.
 
-Skipped by default — it hits twenty third-party APIs and would make the suite
+Skipped by default — it hits eighty-odd third-party APIs and would make the suite
 depend on their uptime. Run it deliberately, on a schedule or after a scout
 brief starts reporting dead boards:
 
@@ -15,6 +15,7 @@ shorter list. This turns that report into a failing test.
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -45,15 +46,36 @@ def live_boards():
 def test_board_slug_still_resolves(live_boards, vendor, slug, company, sector):
     boards, _ = live_boards
     status = boards.source_status.get(company, "never attempted")
-    assert status.endswith("postings"), (
+    # A healthy status starts with a count. It may carry a parenthesised note
+    # after it -- "(early-career search of 1442)" on the boards too large to
+    # sweep whole -- so the check is on the count, not on the whole string.
+    assert re.match(r"\d+ postings", status), (
         f"{company} ({vendor}/{slug}) returned {status!r} — the firm has probably "
         f"moved ATS vendor. Probe candidates and update REGISTRY in sources/jobs.py.")
 
 
 def test_the_sweep_returns_a_plausible_volume(live_boards):
     _, postings = live_boards
-    assert len(postings) > 500, f"only {len(postings)} postings across {len(REGISTRY)} boards"
+    assert len(postings) > 2000, f"only {len(postings)} postings across {len(REGISTRY)} boards"
     assert all(p.title and p.url.startswith("http") for p in postings)
+
+
+def test_every_vendor_in_the_registry_actually_answers(live_boards):
+    """One dead board is maintenance. Every board of one vendor going dark at
+    once is that vendor's API having moved, which is a different fix."""
+    _, postings = live_boards
+    live_vendors = {p.source for p in postings}
+    registry_vendors = {v for v, *_ in REGISTRY}
+    assert registry_vendors <= live_vendors, registry_vendors - live_vendors
+
+
+def test_most_postings_carry_a_publication_date(live_boards):
+    """The "days open" column is only worth a column if the boards fill it."""
+    _, postings = live_boards
+    dated = [p for p in postings if p.posted]
+    assert len(dated) > 0.8 * len(postings), (
+        f"only {len(dated)} of {len(postings)} postings are dated")
+    assert all(p.days_open is None or p.days_open >= 0 for p in postings)
 
 
 def test_some_internships_are_visible(live_boards):

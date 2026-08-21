@@ -8,7 +8,7 @@ honest about what they could not reach.
 | `research` | Ticker or watchlist in; a one-page brief (thesis, risks, valuation context) out, committed to a git repo of research notes | on demand |
 | `backtest` | A strategy idea in plain English → generated code → a sandboxed run → Sharpe, max drawdown, equity curve | on demand |
 | `briefing` | Futures, macro, watchlist movers and today's earnings, before the bell | systemd timer, 08:00 Mon–Fri |
-| `scout` | Quant / fintech / AI job boards swept nightly; only what is new since the last run | systemd timer, 03:30 nightly |
+| `scout` | 84 quant, bank, broker, exchange, fintech, AI and enterprise-IT boards swept nightly; only what is new since the last run, with how long each has been open | systemd timer, 03:30 nightly |
 | `analyst` | Questions answered over your notes *and* the briefs the other four wrote, with citations | on demand |
 
 ```bash
@@ -85,7 +85,12 @@ Walmart earnings" as invented when a Reuters headline says exactly that.
 postings stops being read. The diff runs in one transaction, so a crash cannot
 half-remember a batch and silently drop those postings out of tomorrow's list
 too, and identity is the ATS URL rather than the title, which recruiters edit
-in place.
+in place. Coverage is seven ATS vendors, not three: banks, brokers, exchanges
+and enterprise IT firms run on Workday, Oracle Recruiting and Eightfold, so a
+Greenhouse/Lever/Ashby registry cannot see Cantor Fitzgerald or Nasdaq at all.
+Every row carries how long the posting has been open, counted from the board's
+own publication date — Greenhouse's `first_published` rather than `updated_at`,
+which moves whenever a recruiter edits the requisition.
 
 **analyst** — retrieval is hybrid (BM25 + a local hashed embedding) because
 keyword search alone cannot answer "what did I *conclude*" about a note that
@@ -114,7 +119,7 @@ agents_work/
   gitsink.py    commits briefs to git
 sandbox/        the container the generated backtest code runs in
 deploy/         systemd units + install.sh
-tests/          219 tests, 59 of them benchmark gates
+tests/          341 tests, 131 of them benchmark gates
 ```
 
 ## Setup

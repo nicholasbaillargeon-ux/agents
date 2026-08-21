@@ -31,8 +31,9 @@ AGENTS = {
                  "sandbox, scored on Sharpe and drawdown."),
     "briefing": ("Market open briefing", "Futures, macro, watchlist movers and today's "
                  "earnings, before the bell."),
-    "scout": ("Internship scout", "Quant / fintech / AI boards swept nightly; only what "
-              "is new since last run."),
+    "scout": ("Internship scout", "Quant, bank, broker, exchange, fintech, AI and "
+              "enterprise-IT boards swept nightly; only what is new since last run, "
+              "with how long each posting has been open."),
     "analyst": ("Personal RAG analyst", "Questions answered from your own notes and "
                 "briefs, with citations."),
 }

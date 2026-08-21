@@ -43,18 +43,22 @@ class FakeFetcher(Fetcher):
         self.routes[fragment] = (body, status)
         return self
 
-    def fetch(self, url, *, headers=None, ttl=None, params=None):
+    def fetch(self, url, *, headers=None, ttl=None, params=None, body=None):
         if params:
             import httpx
             url = str(httpx.URL(url).copy_merge_params(params))
         self.requested.append(url)
+        # POST-only boards (Workday) are addressed by url plus body, so a route
+        # may be registered against either. Body routes are matched on the
+        # serialised payload so a test can pin one page of a paginated board.
+        probe = url if body is None else url + "|" + json.dumps(body, sort_keys=True)
         for fragment, value in self.routes.items():
-            if fragment in url:
-                body, status = value if isinstance(value, tuple) else (value, 200)
-                if body is None:
+            if fragment in probe:
+                canned, status = value if isinstance(value, tuple) else (value, 200)
+                if canned is None:
                     self.stats["error"] += 1
                     return None
-                text = body if isinstance(body, str) else json.dumps(body)
+                text = canned if isinstance(canned, str) else json.dumps(canned)
                 self.stats["hit"] += 1
                 return Response(url, status, text, from_cache=True)
         self.stats["error"] += 1

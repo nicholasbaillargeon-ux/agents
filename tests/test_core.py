@@ -134,8 +134,14 @@ class FakeClient:
         return False
 
     def get(self, url, headers=None):
+        return self._respond("GET", url, None)
+
+    def post(self, url, headers=None, json=None):
+        return self._respond("POST", url, json)
+
+    def _respond(self, verb, url, body):
         if self.calls is not None:
-            self.calls.append(url)
+            self.calls.append(url if body is None else (verb, url, body))
         if self.boom:
             raise netcache.httpx.ConnectError("down")
         return type("R", (), {"status_code": self.status, "text": self.text})()
@@ -211,6 +217,39 @@ def test_params_are_merged_into_the_cache_key(tmp_path, monkeypatch):
     f.fetch("https://example.com/a", params={"q": "1"})
     f.fetch("https://example.com/a", params={"q": "2"})
     assert len(calls) == 2
+
+
+def test_a_body_turns_the_fetch_into_a_post(tmp_path, monkeypatch):
+    """Workday and Oracle publish their boards behind POST-only JSON endpoints.
+    They go through the same cache-first fetcher as everything else rather than
+    each growing a client that skips the throttle and the stale fallback."""
+    calls = []
+    monkeypatch.setattr(netcache.httpx, "Client", lambda **kw: FakeClient(calls=calls))
+    f = Fetcher(tmp_path / "cache", ttl=900)
+    r = f.fetch("https://x.wd1.myworkdayjobs.com/wday/cxs/x/C/jobs", body={"offset": 0})
+    assert r.ok
+    assert calls == [("POST", "https://x.wd1.myworkdayjobs.com/wday/cxs/x/C/jobs",
+                      {"offset": 0})]
+
+
+def test_the_request_body_is_part_of_the_cache_key(tmp_path, monkeypatch):
+    """Two pages of a Workday board differ only by the `offset` in their
+    payload; a key that ignored it would serve page 1 for every page."""
+    calls = []
+    monkeypatch.setattr(netcache.httpx, "Client", lambda **kw: FakeClient(calls=calls))
+    f = Fetcher(tmp_path / "cache", ttl=900)
+    url = "https://x.wd1.myworkdayjobs.com/wday/cxs/x/C/jobs"
+    f.fetch(url, body={"offset": 0})
+    f.fetch(url, body={"offset": 20})
+    assert len(calls) == 2
+    assert f.fetch(url, body={"offset": 0}).from_cache
+
+
+def test_workday_and_oracle_hosts_get_a_courtesy_rate_limit():
+    """They are named per tenant, so they can never be listed one by one."""
+    assert netcache._rate_for("nvidia.wd5.myworkdayjobs.com") > netcache._DEFAULT_RATE
+    assert netcache._rate_for("hdow.fa.us6.oraclecloud.com") > netcache._DEFAULT_RATE
+    assert netcache._rate_for("www.sec.gov") == netcache._RATE_LIMITS["www.sec.gov"]
 
 
 def test_rate_limiter_spaces_calls_to_the_same_host():

@@ -1,23 +1,31 @@
 """Agent 4 — internship scout.
 
-Sweeps quant / fintech / AI job boards nightly and surfaces only what is new
-since the last run.
+Sweeps the quant, bank, broker, exchange, fintech, AI and enterprise-IT job
+boards in `sources.jobs.REGISTRY` nightly and surfaces only what is new since
+the last run.
 
 The diff is the product. A scout that re-lists yesterday's ninety postings is
 worse than no scout, because you stop reading it. `store.mark_new` does the
 diff in one transaction, so a crash mid-run cannot half-remember a batch and
 silently drop those postings out of tomorrow's list too.
+
+Each row also carries how long the posting has been open, taken from the
+board's own publication date. It is the one field that separates "this opened
+last night" from "this has been sitting there since March and is probably
+filled", and it is not derivable from the diff: the day the scout first *saw* a
+posting is the day the board was added, not the day the job opened.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
-from ..sources.jobs import REGISTRY, Boards, Posting, posting_key, score
+from ..sources.jobs import (REGISTRY, VENDOR_LABELS, Boards, Posting, days_open,
+                            format_days_open, posting_key, score)
 from ..store import Run, mark_new, record, seen_count, seen_since, unseen_keys
 from .base import AgentResult, Context
 
@@ -28,8 +36,10 @@ NAME = "scout"
 # How many new postings one brief will show. Steady-state nightly volume
 # across these boards is well under this, so the cap only binds after a
 # registry change adds a board -- and when it does, the brief says so and the
-# remainder queue rather than vanishing.
-DISPLAY_LIMIT = 100
+# remainder queue rather than vanishing. It was raised from 100 when the
+# registry went from twenty boards to eighty; the first few nights after that
+# change are a backlog drain, not a steady state.
+DISPLAY_LIMIT = 150
 
 # How many of the day's "apply" verdicts to lift out as a shortlist.
 TOP_MATCHES = 10
@@ -41,17 +51,40 @@ SYSTEM = (
     "of objects with keys `url`, `verdict` (one of: apply, maybe, skip), and "
     "`why` (at most 15 words, concrete). Judge fit, not prestige. A posting "
     "that is senior, non-technical, or in an unrelated function is `skip` even "
-    "at a famous firm. Return ONLY the JSON array."
+    "at a famous firm. `days_open` is how long the posting has been live; a "
+    "long-open posting is not disqualifying but a fresh one is worth more when "
+    "two are otherwise equal. Return ONLY the JSON array."
 )
 
 
-# One verdict costs the model roughly 40 tokens of JSON. Asking for a hundred in
-# a single completion overruns any sane max_tokens and the reply is truncated
-# mid-array — which parses as nothing, so a larger cap would silently cost every
-# verdict rather than a few. Batching keeps each reply comfortably inside its
-# budget and makes one bad batch cost only that batch.
+# Asking for a hundred verdicts in a single completion overruns any sane
+# max_tokens and the reply is truncated mid-array — which parses as nothing, so
+# a larger cap would silently cost every verdict rather than a few. Batching
+# keeps each reply inside its budget and makes one bad batch cost only that
+# batch.
 RANK_BATCH = 25
-TOKENS_PER_VERDICT = 80
+
+# A flat 80 tokens a verdict was fitted to Greenhouse urls and broke the night
+# the Workday and Oracle boards landed: their urls run past a hundred
+# characters, the model echoes each one back, and batches blew the 2000-token
+# cap, truncated mid-array and parsed as nothing. The budget is now measured off
+# the batch it is for.
+#
+# Two characters to a token, not the usual four. That is not a typo: this output
+# is a JSON array of long urls, and urls tokenise badly — every slash, hyphen
+# and id fragment is its own token. A four-chars-a-token estimate was measured
+# against a real reply that spent 2294 tokens on 6003 characters, and hit the
+# cap anyway. The ceiling costs nothing when it is not reached, and costs the
+# whole batch when it is too low.
+CHARS_PER_TOKEN = 2
+CHARS_PER_VERDICT = 120   # the JSON scaffolding plus a 15-word `why`
+BATCH_TOKEN_FLOOR = 1000
+
+
+def rank_budget(batch: list[Posting]) -> int:
+    """max_tokens for one ranking batch, sized to the urls it must echo."""
+    chars = sum(len(p.key) for p in batch) + len(batch) * CHARS_PER_VERDICT
+    return max(BATCH_TOKEN_FLOOR, chars // CHARS_PER_TOKEN)
 
 
 def rank(ctx: Context, postings: list[Posting], *, limit: int | None = None,
@@ -69,10 +102,12 @@ def rank(ctx: Context, postings: list[Posting], *, limit: int | None = None,
         # Send the canonical key, not the raw URL: verdicts come back keyed by
         # whatever was sent, and the caller looks them up by key.
         lines = [f"- url: {p.key}\n  company: {p.company}\n  title: {p.title}\n"
-                 f"  location: {p.location}" for p in batch]
+                 f"  location: {p.location}\n"
+                 f"  days_open: {format_days_open(p.posted, p.posted_is_floor)}"
+                 for p in batch]
         verdicts = ctx.llm.json(
             "Postings:\n" + "\n".join(lines), system=SYSTEM, fast=True,
-            max_tokens=max(1000, len(batch) * TOKENS_PER_VERDICT), default=[])
+            max_tokens=rank_budget(batch), default=[])
         if not isinstance(verdicts, list):
             log.warning("batch %d returned %s, not a list", start // batch_size,
                         type(verdicts).__name__)
@@ -116,6 +151,11 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     for p in candidates:
         by_key.setdefault(p.key, p)
     fresh = unseen_keys(ctx.db, NAME, list(by_key))
+    # Score first, then freshness. Score is the fit signal and stays primary,
+    # but when the cap binds -- and after a registry change it binds for several
+    # nights -- an equally good posting that opened yesterday is the one worth
+    # reading tonight; the older one keeps its place in the queue.
+    fresh.sort(key=lambda k: (-by_key[k].score, _age(by_key[k])))
     new_postings = [by_key[k] for k in fresh[:limit]]
     backlog = len(fresh) - len(new_postings)
 
@@ -137,9 +177,14 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     for d in ctx.base_degradations():
         brief.degrade(d)
 
-    dead = [c for c, status in boards.source_status.items() if not status.endswith("postings")]
+    # A board that answered carries a count; anything else is a hole in the
+    # sweep. The reason travels with the name, because "unreachable" is a retry
+    # tomorrow and "no postings returned" is a registry edit today.
+    dead = {c: status for c, status in boards.source_status.items()
+            if not re.match(r"\d+ postings", status)}
     if dead:
-        brief.degrade(f"{len(dead)} board(s) returned nothing: {', '.join(sorted(dead))}")
+        brief.degrade(f"{len(dead)} board(s) contributed nothing: "
+                      + ", ".join(f"{c} ({s})" for c, s in sorted(dead.items())))
 
     # The digest covers the whole day, not this run. A second run of the same
     # day used to overwrite the morning's findings with its own smaller list --
@@ -158,17 +203,21 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
             f"{i}. **{p.get('company', '')}** — [{p.get('title', '')}]({p.get('url', '')})"
             f" · {p.get('location') or 'location not stated'}"
             f" · score {p.get('score', 0)}"
+            f" · {_age_phrase(p, today)}"
             + (f" · _{p['why']}_" if p.get("why") else "")
             for i, p in enumerate(shortlist, 1)))
 
     if surfaced:
         rows = [[p.get("company", ""),
                  f"[{p.get('title', '')}]({p.get('url', '')})",
-                 p.get("location") or "—", p.get("score", 0),
+                 p.get("location") or "—",
+                 format_days_open(p.get("posted", ""), p.get("posted_is_floor", False), today),
+                 p.get("score", 0),
                  p.get("verdict") or "—", p.get("why", "")]
                 for p in surfaced]
         brief.add(f"Surfaced today ({len(rows)})",
-                  table(["Company", "Role", "Location", "Score", "Verdict", "Why"], rows))
+                  table(["Company", "Role", "Location", "Days open", "Score",
+                         "Verdict", "Why"], rows))
     else:
         brief.add("Surfaced today",
                   "_Nothing new. Every qualifying posting on these boards was already "
@@ -196,8 +245,12 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     else:
         verdict_note = "model ranking was unavailable this run"
 
+    vendors = sorted({v for v, *_ in registry})
+    vendor_names = [VENDOR_LABELS.get(v, v.title()) for v in vendors]
+    undated = [p for p in surfaced if not p.get("posted")]
     brief.add("How this was filtered", (
-        f"- {len(all_postings)} postings pulled from {len(registry)} boards\n"
+        f"- {len(all_postings)} postings pulled from {len(registry)} boards "
+        f"across {len(vendors)} ATS vendors ({', '.join(vendor_names)})\n"
         f"- {len(candidates)} passed the keyword filter "
         f"(score ≥ {min_score}{', internship titles only' if internships_only else ''})\n"
         f"- {len(new_postings)} shown as new this run "
@@ -205,16 +258,51 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
         + (f", {backlog} more queued for the next run (capped at {limit} a night)"
            if backlog else "")
         + f"; {seen_count(ctx.db, NAME)} postings tracked in total\n"
-        f"- {verdict_note.capitalize()}; scores are deterministic keyword weights."))
-    brief.source("Greenhouse / Lever / Ashby public job board APIs",
+        f"- {verdict_note.capitalize()}; scores are deterministic keyword weights\n"
+        f"- Days open counts from the board's own publication date"
+        + (f"; {len(undated)} of {len(surfaced)} rows show — because their board "
+           f"publishes none" if undated else "")
+        + (". Workday reports an age bucket rather than a date, so its rows can "
+           "read \"30+\"" if any(p.get("posted_is_floor") for p in surfaced) else ".")))
+    # Named off the registry rather than hard-coded: the sweep already counts
+    # the vendors two lines above, and a Sources line that listed one the
+    # registry no longer uses would be the brief citing a feed it never read.
+    brief.source(" / ".join(vendor_names) + " public job board APIs",
                  note="each board's own feed, no scraping")
+    fresh_today = sum(1 for p in surfaced if days_open(p.get("posted", ""), today) == 0)
     brief.extra_meta.update({"new": len(new_postings), "today": len(surfaced),
-                             "scanned": len(all_postings),
-                             "candidates": len(candidates), "backlog": backlog})
+                             "scanned": len(all_postings), "boards": len(registry),
+                             "candidates": len(candidates), "backlog": backlog,
+                             "posted_today": fresh_today})
     data = {"all": all_postings, "candidates": candidates, "new": new_postings,
             "verdicts": verdicts, "status": boards.source_status, "backlog": backlog,
             "surfaced_today": surfaced}
     return brief, data
+
+
+# An undated posting sorts as if it were a month old rather than as if it were
+# brand new: boards that publish no date are mostly ones that never did, and
+# letting them jump the queue would push genuinely fresh rows off the page.
+UNDATED_AGE = 30
+
+
+def _age_phrase(payload: dict, today: date | None = None) -> str:
+    """How long the posting has been open, in words, for the shortlist.
+
+    The table gets a number in its own column; a numbered list does not, so
+    "open 3 days" beats a bare "3" wedged between a score and a verdict."""
+    n = days_open(payload.get("posted", ""), today)
+    if n is None:
+        return "posting date not published"
+    plus = "+" if payload.get("posted_is_floor") else ""
+    if n == 0 and not plus:
+        return "posted today"
+    return f"open {n}{plus} day" + ("" if n == 1 and not plus else "s")
+
+
+def _age(p: Posting) -> int:
+    n = p.days_open
+    return UNDATED_AGE if n is None else n
 
 
 def _start_of_day(day) -> float:
