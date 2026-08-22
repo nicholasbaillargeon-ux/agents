@@ -31,6 +31,7 @@ from pathlib import Path
 
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
+from ..sources.prices import LAKE_STALE_DAYS, coverage_gap_days
 from ..store import Run, record
 from .base import AgentResult, Context
 
@@ -327,6 +328,32 @@ def build_brief(job: BacktestJob, result: dict, *, degradations: list[str]) -> B
     return brief
 
 
+def stale_window_notes(result: dict, end: str | None) -> list[str]:
+    """Degradations for symbols whose last bar falls short of the window asked for.
+
+    The sandbox mounts the lake and reads Parquet directly, so it never passes
+    through PriceSource and never sees a staleness note. A lake that stopped
+    updating therefore produces a completely healthy-looking run: every symbol
+    returns its full history, `ok` is true, and the only trace is a curve caption
+    ending weeks early. Judge the result against the calendar instead.
+    """
+    by_gap: dict[str, list[str]] = {}
+    for symbol, r in sorted((result.get("symbols") or {}).items()):
+        if not isinstance(r, dict) or not r.get("end"):
+            continue
+        gap = coverage_gap_days(r["end"], end)
+        if gap > LAKE_STALE_DAYS:
+            by_gap.setdefault(f"{r['end']}|{gap}", []).append(symbol)
+    notes = []
+    for key, symbols in sorted(by_gap.items()):
+        last, gap = key.split("|")
+        notes.append(
+            f"price data for {', '.join(symbols)} ends {last}, {gap} days before "
+            f"{end or 'today'} — the backtest window is short by that much; "
+            f"refresh the market-lab lake")
+    return notes
+
+
 # --- entry point ------------------------------------------------------------
 
 def run(ctx: Context, idea: str, *, symbols: list[str] | None = None,
@@ -393,6 +420,9 @@ def run(ctx: Context, idea: str, *, symbols: list[str] | None = None,
                            degradations=res.degradations,
                            duration_s=(datetime.now(timezone.utc) - started).total_seconds()))
         return res
+
+    for note in stale_window_notes(result, job.end):
+        res.degrade(note)
 
     brief = build_brief(job, result, degradations=res.degradations)
     res.brief = brief

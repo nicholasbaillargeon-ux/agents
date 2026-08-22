@@ -19,6 +19,27 @@ log = logging.getLogger(__name__)
 
 COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
 
+# How far the last bar may sit behind the window actually requested before we
+# say so. Long weekends and market holidays are ordinary, so a few days of
+# gap means nothing; six weeks means the lake stopped being refreshed.
+LAKE_STALE_DAYS = 5
+
+
+def coverage_gap_days(last_bar, end: str | None = None, *, today=None) -> int:
+    """Calendar days between the last bar delivered and the end asked for.
+
+    `end=None` means "up to now", which is the case that goes wrong quietly:
+    a backtest run today against a lake that stopped in July still returns
+    thousands of rows, so no row-count check can catch it.
+    """
+    if last_bar is None:
+        return 0
+    today = pd.Timestamp(today) if today is not None else pd.Timestamp.today()
+    want = pd.Timestamp(end) if end else today
+    want = min(want.normalize(), today.normalize())
+    gap = (want - pd.Timestamp(last_bar).normalize()).days
+    return max(0, int(gap))
+
 # Symbol -> display label for the pre-open dashboard.
 FUTURES = {
     "ES=F": "S&P 500 futures",
@@ -92,14 +113,34 @@ class PriceSource:
         if df is not None and len(df) >= min_rows:
             out = self._slice(df, start, end)
             if len(out) >= min_rows or not self.allow_network:
-                return out
+                return self._note_if_short(symbol, out, end, source="lake")
         live = self._from_network(symbol, start, end)
         if live is not None and not live.empty:
-            return self._slice(live, start, end)
+            return self._note_if_short(symbol, self._slice(live, start, end), end,
+                                       source="live download")
         if df is not None:
-            return self._slice(df, start, end)
+            return self._note_if_short(symbol, self._slice(df, start, end), end,
+                                       source="lake")
         self.notes.append(f"no price history available for {symbol}")
         return pd.DataFrame(columns=COLUMNS)
+
+    def _note_if_short(self, symbol: str, out: pd.DataFrame, end: str | None,
+                       *, source: str) -> pd.DataFrame:
+        """Record a note when the data ends well before the window requested.
+
+        The row count cannot detect this: a lake holding eleven years of history
+        that stopped updating six weeks ago returns every row it ever had, so a
+        backtest asked to run "through today" silently ends in July and reports
+        `degraded: false`. Staleness has to be measured against the calendar.
+        """
+        if out.empty:
+            return out
+        gap = coverage_gap_days(out.index[-1], end)
+        if gap > LAKE_STALE_DAYS:
+            self.notes.append(
+                f"{symbol} {source} ends {out.index[-1].date()}, {gap} days before "
+                f"{'today' if not end else end} — the window is short by that much")
+        return out
 
     def _from_lake(self, symbol: str) -> pd.DataFrame | None:
         path = self.lake_path(symbol)

@@ -436,6 +436,46 @@ def test_llm_json_falls_back_when_unavailable(cfg):
     assert FakeLLM(cfg, available=False).json("prompt", default=[]) == []
 
 
+# -- lake staleness ----------------------------------------------------------
+
+def test_coverage_gap_counts_to_today_when_no_end_given():
+    from agents_work.sources.prices import coverage_gap_days
+    gap = coverage_gap_days("2026-07-06", None, today="2026-08-21")
+    assert gap == 46
+
+
+def test_coverage_gap_respects_an_explicit_end():
+    """A backtest that asked for 2020 is not stale because it is 2026."""
+    from agents_work.sources.prices import coverage_gap_days
+    assert coverage_gap_days("2020-12-31", "2020-12-31", today="2026-08-21") == 0
+    assert coverage_gap_days("2020-11-30", "2020-12-31", today="2026-08-21") == 31
+
+
+def test_coverage_gap_never_looks_past_today():
+    from agents_work.sources.prices import coverage_gap_days
+    assert coverage_gap_days("2026-08-21", "2027-01-01", today="2026-08-21") == 0
+
+
+def test_a_stale_lake_is_reported_not_returned_silently(tmp_path, lake):
+    """The regression this exists for: a lake with years of history that stopped
+    updating returns every row it ever had, so no row-count check can catch it.
+    The run must say the window is short, not just quietly end early."""
+    from agents_work.sources.prices import PriceSource
+    ps = PriceSource(lake, allow_network=False)
+    hist = ps.history("SPY", start="2015-01-01")
+    assert not hist.empty
+    assert any("ends" in n and "short by" in n for n in ps.notes), ps.notes
+
+
+def test_a_window_the_lake_covers_raises_no_note(lake):
+    from agents_work.sources.prices import PriceSource
+    ps = PriceSource(lake, allow_network=False)
+    last = ps.history("SPY", min_rows=2).index[-1].date()
+    ps.notes.clear()
+    ps.history("SPY", start="2020-01-01", end=str(last))
+    assert ps.notes == []
+
+
 # -- news --------------------------------------------------------------------
 
 def _rss(*items):

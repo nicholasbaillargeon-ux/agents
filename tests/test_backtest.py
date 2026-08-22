@@ -328,3 +328,37 @@ def test_sparkline_is_valid_inline_svg_with_a_label():
 
 def test_sparkline_declines_to_draw_a_single_point():
     assert sparkline([{"date": "2020-01-01", "equity": 1.0}]) == ""
+
+
+# -- stale price window ------------------------------------------------------
+
+def test_a_stale_lake_degrades_the_backtest(monkeypatch):
+    """The sandbox reads Parquet directly and never sees a PriceSource note, so
+    a lake that stopped updating produced a run with `degraded: false` whose only
+    tell was a curve caption ending weeks early. Judge it against the calendar."""
+    from agents_work.agents.backtest import stale_window_notes
+    notes = stale_window_notes({"symbols": {"SPY": {"end": "2026-07-06"},
+                                            "QQQ": {"end": "2026-07-06"}}}, None)
+    assert len(notes) == 1
+    assert "QQQ, SPY" in notes[0] and "2026-07-06" in notes[0]   # sorted, so the note is stable
+    assert "refresh the market-lab lake" in notes[0]
+
+
+def test_a_backtest_that_asked_for_an_old_window_is_not_flagged():
+    from agents_work.agents.backtest import stale_window_notes
+    assert stale_window_notes({"symbols": {"SPY": {"end": "2020-12-31"}}},
+                              "2020-12-31") == []
+
+
+def test_symbols_with_different_last_bars_are_reported_separately():
+    """One delisted symbol is not the same finding as a lake-wide stall."""
+    from agents_work.agents.backtest import stale_window_notes
+    notes = stale_window_notes({"symbols": {"SPY": {"end": "2026-07-06"},
+                                            "DEAD": {"end": "2024-01-05"}}}, None)
+    assert len(notes) == 2
+
+
+def test_a_failed_symbol_is_not_mistaken_for_a_stale_one():
+    from agents_work.agents.backtest import stale_window_notes
+    assert stale_window_notes({"symbols": {"SPY": {"ok": False, "error": "boom"}}},
+                              None) == []
