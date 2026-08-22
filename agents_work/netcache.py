@@ -177,3 +177,81 @@ class Fetcher:
         else:
             log.warning("HTTP %d from %s", resp.status, url)
         return resp
+
+
+# The cache is the only piece of state here with no ceiling. Keys are a hash of
+# the URL, so a nightly re-run of the same board overwrites its own entry rather
+# than adding one -- what actually accumulates is *variety*: every ticker ever
+# researched leaves a permanent `companyfacts` blob behind, and those run to 12MB
+# apiece (59 of them were 45MB of a 85MB cache the first day). Nothing ever read
+# them again. So the cap is on total bytes, evicting least-recently-written first.
+#
+# mtime is the right recency signal even though a cache *hit* does not touch it:
+# an entry still in use gets rewritten every time its TTL lapses, so its mtime
+# stays fresh, while one that is never requested again ages out. That is exactly
+# the ticker-researched-once case this exists to collect.
+CACHE_TMP_MAX_AGE = 3600
+
+
+def prune_cache(cache_dir: Path, max_bytes: int, *, dry_run: bool = False) -> dict:
+    """Evict least-recently-written entries until the cache fits `max_bytes`.
+
+    Returns a summary rather than logging one, so the caller decides whether a
+    routine eviction is worth a line of output. Never raises: a cache that
+    cannot be pruned is a disk-space problem, not a reason to fail a run that
+    has already produced its brief.
+    """
+    stats = {"kept": 0, "kept_bytes": 0, "removed": 0, "freed_bytes": 0, "tmp_removed": 0}
+    cache_dir = Path(cache_dir)
+    if not cache_dir.is_dir():
+        return stats
+
+    entries: list[tuple[float, str, Path, int]] = []
+    now = time.time()
+    for entry in cache_dir.iterdir():
+        try:
+            if not entry.is_file():
+                continue
+            st = entry.stat()
+        except OSError:
+            continue  # vanished under us; nothing to account for
+        if entry.suffix == ".tmp":
+            # A stray .tmp is a write that died between write_text and replace.
+            # Age-gate it so a prune racing a live fetch cannot eat its scratch file.
+            if now - st.st_mtime > CACHE_TMP_MAX_AGE and not dry_run:
+                try:
+                    entry.unlink()
+                    stats["tmp_removed"] += 1
+                except OSError:
+                    pass
+            continue
+        # Sort newest first, breaking mtime ties by name so the eviction set is
+        # deterministic -- a test that writes its fixtures in one second would
+        # otherwise pick a different victim each run.
+        entries.append((st.st_mtime, entry.name, entry, st.st_size))
+
+    entries.sort(key=lambda e: (-e[0], e[1]))
+
+    total = 0
+    for mtime, _name, path, size in entries:
+        if total + size <= max_bytes:
+            total += size
+            stats["kept"] += 1
+            stats["kept_bytes"] = total
+            continue
+        if dry_run:
+            stats["removed"] += 1
+            stats["freed_bytes"] += size
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            # Could not remove it, so it is still occupying the budget: count it
+            # as kept or the next run will evict a healthy entry to make room.
+            total += size
+            stats["kept"] += 1
+            stats["kept_bytes"] = total
+            continue
+        stats["removed"] += 1
+        stats["freed_bytes"] += size
+    return stats

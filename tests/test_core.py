@@ -260,6 +260,97 @@ def test_rate_limiter_spaces_calls_to_the_same_host():
     assert time.monotonic() - t0 >= 0.10
 
 
+# -- cache prune -------------------------------------------------------------
+
+def _entry(cache: Path, name: str, size: int, age_s: float) -> Path:
+    cache.mkdir(parents=True, exist_ok=True)
+    f = cache / name
+    f.write_text("x" * size)
+    import os
+    stamp = time.time() - age_s
+    os.utime(f, (stamp, stamp))
+    return f
+
+
+def test_prune_is_a_noop_under_the_cap(tmp_path):
+    cache = tmp_path / "cache"
+    _entry(cache, "a.json", 100, 10)
+    st = netcache.prune_cache(cache, 10_000)
+    assert st["removed"] == 0 and st["kept"] == 1
+    assert (cache / "a.json").exists()
+
+
+def test_prune_evicts_oldest_first_until_it_fits(tmp_path):
+    cache = tmp_path / "cache"
+    _entry(cache, "new.json", 400, age_s=1)
+    _entry(cache, "mid.json", 400, age_s=100)
+    _entry(cache, "old.json", 400, age_s=10_000)
+    st = netcache.prune_cache(cache, 900)
+    # 400 + 400 fits under 900; the third does not, and it is the stale one.
+    assert st["kept"] == 2 and st["removed"] == 1
+    assert (cache / "new.json").exists() and (cache / "mid.json").exists()
+    assert not (cache / "old.json").exists()
+    assert st["freed_bytes"] == 400
+
+
+def test_prune_keeps_the_big_recent_blob_over_small_stale_ones(tmp_path):
+    """The case this exists for: one 12MB companyfacts pull from a ticker nobody
+    researches again should go before anything the nightly sweep still reads."""
+    cache = tmp_path / "cache"
+    _entry(cache, "stale_big.json", 5_000, age_s=90_000)
+    for i in range(5):
+        _entry(cache, f"nightly{i}.json", 200, age_s=60)
+    st = netcache.prune_cache(cache, 1_500)
+    assert not (cache / "stale_big.json").exists()
+    assert all((cache / f"nightly{i}.json").exists() for i in range(5))
+    assert st["kept"] == 5 and st["kept_bytes"] == 1_000
+
+
+def test_prune_dry_run_reports_without_deleting(tmp_path):
+    cache = tmp_path / "cache"
+    _entry(cache, "old.json", 400, age_s=10_000)
+    _entry(cache, "new.json", 400, age_s=1)
+    st = netcache.prune_cache(cache, 500, dry_run=True)
+    assert st["removed"] == 1 and st["freed_bytes"] == 400
+    assert (cache / "old.json").exists() and (cache / "new.json").exists()
+
+
+def test_prune_collects_stray_tmp_files_but_spares_fresh_ones(tmp_path):
+    """A .tmp is a write that died between write_text and replace. An old one is
+    garbage; a fresh one may belong to a fetch running right now."""
+    cache = tmp_path / "cache"
+    _entry(cache, "dead.tmp", 50, age_s=netcache.CACHE_TMP_MAX_AGE + 60)
+    _entry(cache, "live.tmp", 50, age_s=5)
+    st = netcache.prune_cache(cache, 10_000)
+    assert st["tmp_removed"] == 1
+    assert not (cache / "dead.tmp").exists() and (cache / "live.tmp").exists()
+
+
+def test_prune_ignores_tmp_files_when_budgeting(tmp_path):
+    cache = tmp_path / "cache"
+    _entry(cache, "keep.json", 400, age_s=1)
+    _entry(cache, "live.tmp", 5_000, age_s=5)
+    st = netcache.prune_cache(cache, 500)
+    assert st["kept"] == 1 and st["removed"] == 0
+    assert (cache / "keep.json").exists()
+
+
+def test_prune_survives_a_missing_directory(tmp_path):
+    st = netcache.prune_cache(tmp_path / "never-created", 1_000)
+    assert st == {"kept": 0, "kept_bytes": 0, "removed": 0, "freed_bytes": 0,
+                  "tmp_removed": 0}
+
+
+def test_prune_keeps_a_live_cache_readable(tmp_path, monkeypatch):
+    """End to end: a pruned-away entry re-fetches, a kept one still serves."""
+    monkeypatch.setattr(netcache.httpx, "Client", lambda **kw: FakeClient(text="live"))
+    f = Fetcher(tmp_path / "cache", ttl=900)
+    f.fetch("https://example.com/keep")
+    assert f.fetch("https://example.com/keep").from_cache
+    netcache.prune_cache(tmp_path / "cache", 0)          # evict everything
+    assert not f.fetch("https://example.com/keep").from_cache
+
+
 # -- git ---------------------------------------------------------------------
 
 def test_repo_is_created_idempotently(tmp_path):

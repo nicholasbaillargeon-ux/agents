@@ -65,3 +65,31 @@ def test_research_accepts_several_tickers(monkeypatch, capsys):
                                        "degradations": [], "error": None, "data": {}})())
     assert cli.main(["research", "NVDA", "AAPL"]) == 0
     assert seen == ["NVDA", "AAPL"]
+
+
+def test_prune_reports_what_it_evicted(capsys, cfg):
+    cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(4):
+        (cfg.cache_dir / f"e{i}.json").write_text("x" * 400)
+    assert cli.main(["prune", "--max-mb", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "evicted 4" in out
+    assert not list(cfg.cache_dir.glob("*.json"))
+
+
+def test_prune_dry_run_changes_nothing(capsys, cfg):
+    cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.cache_dir / "e.json").write_text("x" * 400)
+    assert cli.main(["prune", "--max-mb", "0", "--dry-run"]) == 0
+    assert "would evict 1" in capsys.readouterr().out
+    assert (cfg.cache_dir / "e.json").exists()
+
+
+def test_a_run_prunes_the_cache_afterwards(monkeypatch, cfg):
+    """The sweep is wired into the command path, not just the prune subcommand
+    -- otherwise the cap only applies when someone remembers to invoke it."""
+    cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.cache_dir / "old.json").write_text("x" * 4000)
+    monkeypatch.setattr(cfg.__class__, "cache_max_bytes", property(lambda self: 0))
+    cli.main(["ask", "anything"])
+    assert not (cfg.cache_dir / "old.json").exists()

@@ -41,6 +41,10 @@ class Config:
     vault_roots: list[Path]
     port: int
     http_cache_ttl: int = 900
+    # Cap on the on-disk response cache. Sized well above a steady-state
+    # sweep (one nightly scout is ~40MB of overwrites) so the cap only ever
+    # bites the long tail of one-off research blobs.
+    http_cache_max_mb: int = 256
     _extra: dict = field(default_factory=dict, repr=False)
 
     # --- derived paths -------------------------------------------------
@@ -59,6 +63,10 @@ class Config:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "runs.db"
+
+    @property
+    def cache_max_bytes(self) -> int:
+        return self.http_cache_max_mb * 1024 * 1024
 
     # --- capability flags ----------------------------------------------
     @property
@@ -105,6 +113,7 @@ def load_config(**overrides) -> Config:
         vault_roots=_paths(os.getenv("AGENTS_VAULT_ROOTS", str(data_dir / "research-notes"))),
         port=int(os.getenv("AGENTS_PORT", "8110")),
         http_cache_ttl=int(os.getenv("AGENTS_HTTP_CACHE_TTL", "900")),
+        http_cache_max_mb=int(os.getenv("AGENTS_HTTP_CACHE_MAX_MB", "256")),
     )
     if overrides:
         from dataclasses import replace

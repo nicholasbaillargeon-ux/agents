@@ -11,7 +11,10 @@ from datetime import datetime
 from .agents import analyst, backtest, briefing, research, scout
 from .agents.base import Context
 from .config import load_config
+from .netcache import prune_cache
 from .store import recent
+
+log = logging.getLogger(__name__)
 
 
 def _print_result(res, *, as_json: bool) -> int:
@@ -77,6 +80,12 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--reindex", action="store_true")
 
     sub.add_parser("index", help="rebuild the analyst index")
+
+    pr = sub.add_parser("prune", help="trim the HTTP cache to its size cap")
+    pr.add_argument("--max-mb", type=int, default=None,
+                    help="override the configured cap for this run")
+    pr.add_argument("--dry-run", action="store_true",
+                    help="report what would be evicted, delete nothing")
     sub.add_parser("status", help="recent runs")
     sub.add_parser("doctor", help="what works right now")
 
@@ -87,6 +96,14 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config()
     if args.cmd == "doctor":
         return _doctor(cfg)
+    if args.cmd == "prune":
+        cap = cfg.cache_max_bytes if args.max_mb is None else args.max_mb * 1024 * 1024
+        st = prune_cache(cfg.cache_dir, cap, dry_run=args.dry_run)
+        verb = "would evict" if args.dry_run else "evicted"
+        print(f"cache {st['kept_bytes'] / 1048576:.1f}MB in {st['kept']} entries "
+              f"(cap {cap / 1048576:.0f}MB); {verb} {st['removed']} "
+              f"freeing {st['freed_bytes'] / 1048576:.1f}MB")
+        return 0
     if args.cmd == "status":
         ctx = Context(cfg)
         for row in recent(ctx.db, limit=20):
@@ -136,6 +153,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     finally:
         ctx.close()
+        # After the brief is written, never before: an eviction must not be
+        # able to cost a run the cached response it was about to read.
+        st = prune_cache(cfg.cache_dir, cfg.cache_max_bytes)
+        if st["removed"] or st["tmp_removed"]:
+            log.info("cache pruned: %d entries freeing %.1fMB, %d stray tmp",
+                     st["removed"], st["freed_bytes"] / 1048576, st["tmp_removed"])
     return 2
 
 
