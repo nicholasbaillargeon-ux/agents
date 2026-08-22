@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import re
-
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 import pytest
 
 from agents_work.agents import scout
-from agents_work.sources.jobs import Boards, Posting, score
+from agents_work.sources.jobs import Boards, Posting, location_in_range, score
 from agents_work.store import mark_new, seen_count
 
 REGISTRY = (("greenhouse", "quantco", "QuantCo", "quant"),
@@ -17,23 +17,33 @@ REGISTRY = (("greenhouse", "quantco", "QuantCo", "quant"),
             ("ashby", "aico", "AICo", "ai"))
 
 
+# Fixture dates are relative to today, not absolute. They used to be literals
+# ("2026-08-19", epoch 1_755_000_000_000) and that was fine while nothing read
+# them; `scout.MAX_DAYS_OPEN` reads them now, so a literal is a test that passes
+# this month and fails in October for no reason anyone will remember.
+def _days_ago(n: int) -> date:
+    return date.today() - timedelta(days=n)
+
+
 def greenhouse(*titles):
     return {"jobs": [{"title": t, "location": {"name": "New York, NY"},
                       "absolute_url": f"https://boards.greenhouse.io/quantco/jobs/{i}",
-                      "updated_at": "2026-08-19T10:00:00Z"}
+                      "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}
                      for i, t in enumerate(titles, 1)]}
 
 
 def lever(*titles):
+    created_ms = int(datetime.combine(
+        _days_ago(5), dtime(), tzinfo=timezone.utc).timestamp() * 1000)
     return [{"text": t, "categories": {"location": "Remote"},
              "hostedUrl": f"https://jobs.lever.co/fintechco/{i}",
-             "createdAt": 1_755_000_000_000} for i, t in enumerate(titles, 1)]
+             "createdAt": created_ms} for i, t in enumerate(titles, 1)]
 
 
 def ashby(*titles):
     return {"jobs": [{"title": t, "location": "Chicago",
                       "jobUrl": f"https://jobs.ashbyhq.com/aico/{i}",
-                      "publishedAt": "2026-08-18T00:00:00Z"}
+                      "publishedAt": f"{_days_ago(4).isoformat()}T00:00:00Z"}
                      for i, t in enumerate(titles, 1)]}
 
 
@@ -607,7 +617,11 @@ def test_days_open_counts_from_first_publication_not_last_edit(ctx, fetcher):
     column is for."""
     fetcher.route("boards/quantco/jobs",
                   _gh_dated("2026-03-01T09:00:00Z", updated="2026-08-20T10:00:00Z"))
-    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
+    # The freshness gate would drop this posting on sight, which is the correct
+    # behaviour and the wrong thing to be testing here: the question is where
+    # `posted` is read from, not whether a March req is worth showing.
+    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False,
+                                max_days_open=10_000)
     assert data["new"][0].posted == "2026-03-01"
     assert data["new"][0].days_open > 150
 
@@ -675,10 +689,10 @@ def test_the_freshest_posting_wins_the_last_slot_when_the_cap_binds(ctx, fetcher
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": "Quantitative Trading Intern old", "location": {"name": "NYC"},
          "absolute_url": "https://x.com/jobs/old",
-         "first_published": "2025-01-01T00:00:00Z"},
+         "first_published": f"{_days_ago(18).isoformat()}T00:00:00Z"},
         {"title": "Quantitative Trading Intern new", "location": {"name": "NYC"},
          "absolute_url": "https://x.com/jobs/new",
-         "first_published": "2026-08-19T00:00:00Z"}]})
+         "first_published": f"{_days_ago(1).isoformat()}T00:00:00Z"}]})
     _, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=1, use_llm=False)
     assert [p.title for p in data["new"]] == ["Quantitative Trading Intern new"]
     assert data["backlog"] == 1
@@ -958,3 +972,142 @@ def test_every_vendor_the_registry_uses_has_an_adapter_and_a_label():
     assert used <= set(VENDOR_LABELS)
     # and no adapter is carried for a vendor nothing uses
     assert used == set(VENDORS), f"unused adapters: {set(VENDORS) - used}"
+
+
+# -- range and freshness gates -----------------------------------------------
+#
+# Both are hard gates ahead of the model rather than score penalties: a Singapore
+# desk and a two-month-old req are not weaker matches, they are not matches, and
+# a verdict spent rejecting them is a verdict paid for twice.
+
+def _gh_at(location, title="Quantitative Trading Intern", days=2, url="a"):
+    return {"jobs": [{"title": title, "location": {"name": location},
+                      "absolute_url": f"https://x.com/jobs/{url}",
+                      "first_published": f"{_days_ago(days).isoformat()}T00:00:00Z"}]}
+
+
+def _titles(ctx, fetcher, payload, **kw):
+    fetcher.route("boards/quantco/jobs", payload)
+    _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False, **kw)
+    return [p.title for p in data["new"]]
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("location,wanted", [
+    ("New York, NY, United States", True),
+    ("Toronto, ON", True),
+    ("London", True),
+    ("Chicago; New York", True),
+    ("Singapore", False),
+    ("Hong Kong", False),
+    ("Amsterdam, Netherlands", False),
+    ("Bengaluru, India", False),
+    ("Mexico City, Distrito Federal, Mexico", False),
+    ("Dublin, Ireland", False),
+])
+def test_the_range_is_the_us_canada_and_london(location, wanted):
+    """S20: every one of these is a location string the live sweep returned."""
+    assert location_in_range("Quantitative Trading Intern", location) is wanted
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("location", [
+    "London; Amsterdam", "New York, London, or Paris",
+    "London, Paris, Hong Kong, Tokyo", "Chicago, Florida, New York, San Francisco",
+])
+def test_a_posting_counts_if_any_of_its_sites_is_in_range(location):
+    """S20: firms list a whole desk's offices in one field. Rejecting the row
+    because Tokyo is on it would reject the London seat that is on it too."""
+    assert location_in_range("Summer Analyst", location)
+
+
+@pytest.mark.benchmark
+def test_the_title_carries_the_location_when_the_field_does_not(ctx, fetcher):
+    """S20 (regression). Cloudflare files every posting under 'In-Office' and
+    puts the city in the title. Reading the location field alone dropped all
+    eleven of its internships as unlocatable."""
+    assert location_in_range(
+        "Software Engineer Intern (Fall 2026) - Austin, TX", "In-Office")
+    assert _titles(ctx, fetcher, _gh_at(
+        "In-Office", title="Machine Learning Intern (Fall 2026) - Austin, TX"))
+
+
+def test_a_board_that_names_no_place_is_kept_rather_than_guessed_at():
+    """Capital One files multi-site postings as '8 Locations'. That is a filing
+    convention, not evidence of a Bangalore desk; the model's triage prompt
+    carries the same range rule and can still skip it."""
+    assert location_in_range("Data Science Internship - Summer 2027", "8 Locations")
+    assert location_in_range("Software Engineer Intern", "")
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("location,wanted", [
+    ("Manchester, NH", True), ("Manchester, United Kingdom", False),
+    ("Birmingham, AL", True), ("Birmingham, UK", False),
+    ("San Jose, CA", True), ("San Jose, Costa Rica", False),
+])
+def test_cities_that_exist_on_both_sides_of_the_line(location, wanted):
+    """S20: the range excludes the UK apart from London, and both of England's
+    ambiguous cities have a US namesake that the boards write identically."""
+    assert location_in_range("Software Engineer Intern", location) is wanted
+
+
+@pytest.mark.benchmark
+def test_a_posting_open_longer_than_three_weeks_is_not_shown(ctx, fetcher):
+    """S21: past three weeks a req has collected the applications it will read,
+    and surfacing it spends the reader's attention on a race already over."""
+    assert _titles(ctx, fetcher, _gh_at("New York, NY", days=22, url="a")) == []
+    assert _titles(ctx, fetcher, _gh_at("New York, NY", days=90, url="b")) == []
+
+
+@pytest.mark.benchmark
+def test_the_boundary_day_is_inside_the_window(ctx, fetcher):
+    """S21: exactly three weeks old still counts -- the gate is <=, and an
+    off-by-one here silently costs a day of postings every day."""
+    # Distinct urls: the diff is doing its job, and two calls with one url would
+    # make the second run's empty list read as a gate rejection.
+    assert _titles(ctx, fetcher, _gh_at("New York, NY", days=21, url="a")) != []
+    assert _titles(ctx, fetcher, _gh_at("New York, NY", days=20, url="b")) != []
+
+
+@pytest.mark.benchmark
+def test_a_workday_age_floor_over_the_window_is_dropped(ctx, fetcher):
+    """S21: Workday publishes an age bucket, not a date. '30+' means at least 30 days,
+    which is already outside the window. A floor inside it stays, because '7+'
+    could still be a fresh posting and the board is not saying otherwise."""
+    old = Posting("X", "Quant Intern", "New York, NY", "u",
+                  posted=_days_ago(30).isoformat(), posted_is_floor=True)
+    young = Posting("X", "Quant Intern", "New York, NY", "u",
+                    posted=_days_ago(7).isoformat(), posted_is_floor=True)
+    assert not scout._fresh_enough(old, scout.MAX_DAYS_OPEN)
+    assert scout._fresh_enough(young, scout.MAX_DAYS_OPEN)
+
+
+def test_an_undated_posting_is_kept_not_hidden():
+    """A board that stops publishing dates should show up as rows with an em
+    dash in the Days open column, not as a board that quietly went dark."""
+    p = Posting("X", "Quant Intern", "New York, NY", "u", posted="")
+    assert scout._fresh_enough(p, scout.MAX_DAYS_OPEN)
+
+
+@pytest.mark.benchmark
+def test_the_brief_shows_what_each_gate_removed(ctx, fetcher):
+    """S20, S21: a filter the reader cannot see is a filter they cannot correct.
+    Both gates report their own count, so "the scout found nothing" is separable
+    from "the range is too narrow" and from "the window is too short"."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": "Quantitative Trading Intern", "location": {"name": "New York, NY"},
+         "absolute_url": "https://x.com/jobs/1",
+         "first_published": f"{_days_ago(2).isoformat()}T00:00:00Z"},
+        {"title": "Quantitative Trading Intern", "location": {"name": "Singapore"},
+         "absolute_url": "https://x.com/jobs/2",
+         "first_published": f"{_days_ago(2).isoformat()}T00:00:00Z"},
+        {"title": "Quantitative Trading Intern", "location": {"name": "Chicago, IL"},
+         "absolute_url": "https://x.com/jobs/3",
+         "first_published": f"{_days_ago(60).isoformat()}T00:00:00Z"}]})
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
+    assert len(data["new"]) == 1
+    text = brief.render()
+    assert "United States, Canada or London" in text
+    assert "opened within the last 21 days" in text
+    assert "1 were older and are not shown" in text

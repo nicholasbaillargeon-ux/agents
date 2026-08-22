@@ -1,11 +1,13 @@
 [Unit]
-Description=Sweep the job boards nightly and diff against what was already seen
+Description=Sweep the job boards every three hours and diff against what was already seen
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+# Every three hours, keeping the original :30 offset (00:30, 03:30, ... 21:30).
+# A posting now surfaces within ~3h instead of up to a day.
+OnCalendar=*-*-* 00/3:30:00
 Persistent=true
 # Eighty-odd public job boards get hit in sequence; a jittered start keeps this
-# from looking like a scripted sweep arriving on the same second every night.
+# from looking like a scripted sweep arriving on the same second every cycle.
 RandomizedDelaySec=900
 AccuracySec=1min
 

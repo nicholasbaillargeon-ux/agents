@@ -25,7 +25,7 @@ from datetime import date, datetime, timezone
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
 from ..sources.jobs import (REGISTRY, VENDOR_LABELS, Boards, Posting, days_open,
-                            format_days_open, posting_key, score)
+                            format_days_open, location_in_range, posting_key, score)
 from ..store import Run, mark_new, record, seen_count, seen_since, unseen_keys
 from .base import AgentResult, Context
 
@@ -44,16 +44,29 @@ DISPLAY_LIMIT = 150
 # How many of the day's "apply" verdicts to lift out as a shortlist.
 TOP_MATCHES = 10
 
+# Postings open longer than this are not shown. Three weeks is roughly the point
+# where an internship req has already collected the applications it is going to
+# read, and the scout that surfaces it is spending the reader's attention on a
+# race that is over. Applied after the range gate and before the model, so a
+# stale posting costs neither a row nor a verdict.
+MAX_DAYS_OPEN = 21
+
 SYSTEM = (
-    "You triage job postings for one candidate: an undergraduate targeting "
-    "quant / fintech / AI internships, strongest in Python, data pipelines, and "
-    "full-slice deployment. For each posting you are given, return a JSON array "
-    "of objects with keys `url`, `verdict` (one of: apply, maybe, skip), and "
-    "`why` (at most 15 words, concrete). Judge fit, not prestige. A posting "
+    "You triage job postings for one candidate: a junior-year computer "
+    "engineering undergraduate aiming at AI and finance, strongest in Python, "
+    "data pipelines, and full-slice deployment, and comfortable across the "
+    "hardware/software line. For each posting you are given, return a JSON "
+    "array of objects with keys `url`, `verdict` (one of: apply, maybe, skip), "
+    "and `why` (at most 15 words, concrete). Judge fit, not prestige. A posting "
     "that is senior, non-technical, or in an unrelated function is `skip` even "
-    "at a famous firm. `days_open` is how long the posting has been live; a "
-    "long-open posting is not disqualifying but a fresh one is worth more when "
-    "two are otherwise equal. Return ONLY the JSON array."
+    "at a famous firm. The candidate will only work in the United States, "
+    "Canada, or London: `skip` anything sited elsewhere, and where a posting "
+    "names several offices, judge it on the ones in that range. Some boards "
+    "publish no usable location at all -- treat those on their merits rather "
+    "than assuming the worst. `days_open` is how long the posting has been "
+    "live; every posting you are shown opened within the last three weeks, so "
+    "use it only to break ties between otherwise equal roles. Return ONLY the "
+    "JSON array."
 )
 
 
@@ -134,14 +147,25 @@ VERDICT_ORDER = {"apply": 0, "maybe": 1, "": 2, "skip": 3}
 
 def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
                 internships_only: bool = True, limit: int = DISPLAY_LIMIT,
+                max_days_open: int = MAX_DAYS_OPEN,
                 use_llm: bool = True) -> tuple[Brief, dict]:
     boards = Boards(ctx.fetcher)
     all_postings = boards.fetch_all(registry, ttl=1800)
 
     for p in all_postings:
         score(p)
-    candidates = [p for p in all_postings
+    qualifying = [p for p in all_postings
                   if p.score >= min_score and (p.is_internship or not internships_only)]
+    # Range first, then age. Both are hard gates rather than score adjustments,
+    # and both run before `rank` so an out-of-range or stale posting costs no
+    # verdict: the last sweep carried 19 Singapore rows and 99 postings older
+    # than three weeks that the model was paying to read and reject.
+    in_range = [p for p in qualifying if location_in_range(p.title, p.location)]
+    # Counted, not hidden: these are the rows the gate let through without ever
+    # confirming a place, and the reader deserves to know how much of the range
+    # line rests on them.
+    unlocated = sum(1 for p in in_range if _names_no_place(p.location))
+    candidates = [p for p in in_range if _fresh_enough(p, max_days_open)]
     candidates.sort(key=lambda p: -p.score)
 
     # Claim only what this brief will actually show. Marking every candidate
@@ -251,8 +275,17 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     brief.add("How this was filtered", (
         f"- {len(all_postings)} postings pulled from {len(registry)} boards "
         f"across {len(vendors)} ATS vendors ({', '.join(vendor_names)})\n"
-        f"- {len(candidates)} passed the keyword filter "
+        f"- {len(qualifying)} passed the keyword filter "
         f"(score ≥ {min_score}{', internship titles only' if internships_only else ''})\n"
+        f"- {len(in_range)} of those are sited in the United States, Canada or "
+        f"London"
+        + (f", counting {unlocated} whose board publishes no usable location"
+           if unlocated else "")
+        + f"\n- {len(candidates)} of those opened within the last "
+        f"{max_days_open} days"
+        + (f"; {len(in_range) - len(candidates)} were older and are not shown"
+           if len(candidates) < len(in_range) else "")
+        + "\n"
         f"- {len(new_postings)} shown as new this run "
         f"({len(surfaced)} surfaced today in total)"
         + (f", {backlog} more queued for the next run (capped at {limit} a night)"
@@ -298,6 +331,31 @@ def _age_phrase(payload: dict, today: date | None = None) -> str:
     if n == 0 and not plus:
         return "posted today"
     return f"open {n}{plus} day" + ("" if n == 1 and not plus else "s")
+
+
+# Location text that is a filing convention rather than a place: Cloudflare's
+# "In-Office", Capital One's "8 Locations", a bare "Remote" with no country.
+_NO_PLACE_RE = re.compile(
+    r"\s*(in-?office|on-?site|remote|virtual|hybrid|flexible|multiple locations|"
+    r"\d+ locations)\s*$", re.I)
+
+
+def _names_no_place(location: str) -> bool:
+    """Did the board give a location that names nowhere?"""
+    return not location.strip() or bool(_NO_PLACE_RE.fullmatch(location))
+
+
+def _fresh_enough(p: Posting, max_days: int) -> bool:
+    """Inside the freshness window?
+
+    A Workday floor works without a special case: its "30+" bucket parses to 30,
+    which is already over the limit, while a "7+" bucket could still be inside it
+    and is kept. An undated posting is kept too -- there were none in the last
+    366 tracked, but a board that stops publishing dates should show up as rows
+    with an em dash in the Days open column, not as a board that went quiet.
+    """
+    n = p.days_open
+    return n is None or n <= max_days
 
 
 def _age(p: Posting) -> int:

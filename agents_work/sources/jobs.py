@@ -218,6 +218,17 @@ RELEVANT = {
     "low latency": 3, "fpga": 2, "distributed": 2, "database": 1, "sql": 1,
     "java": 2, "golang": 2, "rust": 2, "risk": 1, "electronic trading": 3,
     "market data": 2, "automation": 1, "security engineer": 2, "networking": 1,
+    # The AI half of "AI and finance", spelled the way postings spell it. "ai"
+    # and "ml" above catch the acronyms; these catch the roles that never use
+    # them, and an LLM or inference-infrastructure internship is the single
+    # closest match on these boards to what the candidate is aiming at.
+    "deep learning": 3, "llm": 3, "generative": 2, "neural": 2, "inference": 2,
+    "computer vision": 2, "nlp": 2, "pytorch": 2, "cuda": 2, "gpu": 2,
+    # Computer engineering proper -- the hardware/software line the candidate
+    # is on, and where the quant boards keep their most technical internships.
+    "computer engineering": 3, "embedded": 2, "firmware": 2, "hardware": 1,
+    "verilog": 2, "rtl": 2, "asic": 2, "signal processing": 2, "robotics": 1,
+    "compiler": 2, "kernel": 1,
 }
 IRRELEVANT = {
     "sales": -4, "recruiting": -4, "recruiter": -4, "marketing": -3, "legal": -4,
@@ -251,6 +262,122 @@ _METRO_RE = re.compile(
     r"\b(new york|nyc|manhattan|chicago|remote|boston|jersey city|stamford)\b", re.I)
 
 
+# --- Geography gate -------------------------------------------------------
+# Range is the United States, Canada and London. A hard filter, not a score
+# penalty: a Singapore desk is not a weaker match than a New York one, it is not
+# a match at all, and the last sweep carried 19 Singapore rows the model still
+# paid to triage.
+#
+# Allow is tested before deny, and both are whole-word. That ordering is the
+# whole design. It is what makes multi-site postings work -- "London; Amsterdam"
+# and "New York, London, or Paris" are in range because one site is -- and it is
+# what resolves the city names that exist on both sides of the line:
+# "Manchester, NH" and "Birmingham, AL" match their US state and never reach the
+# UK entries below.
+IN_RANGE = (
+    "united states", "united states of america", "usa", "america",
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+    "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+    "new mexico", "new york", "north carolina", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+    "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming",
+    # Cities, because plenty of boards give a city and stop there.
+    "nyc", "manhattan", "brooklyn", "jersey city", "hoboken", "stamford",
+    "greenwich", "princeton", "chicago", "boston", "cambridge, ma", "somerville",
+    "san francisco", "bay area", "silicon valley", "palo alto", "menlo park",
+    "mountain view", "sunnyvale", "santa clara", "san mateo",
+    "redwood city", "cupertino", "irvine", "los angeles", "san diego",
+    "seattle", "bellevue", "redmond", "portland", "austin", "dallas", "frisco",
+    "houston", "atlanta", "charlotte", "raleigh", "durham", "miami", "sunrise",
+    "tampa", "orlando", "phoenix", "tempe", "denver", "boulder", "salt lake city",
+    "las vegas", "minneapolis", "detroit", "ann arbor", "columbus", "cleveland",
+    "pittsburgh", "philadelphia", "baltimore", "arlington", "reston", "mclean",
+    "nashville", "st. louis", "saint louis", "kansas city", "madison",
+    # Canada.
+    "canada", "canadian", "toronto", "montreal", "montréal", "vancouver",
+    "ottawa", "calgary", "edmonton", "winnipeg", "waterloo", "kitchener",
+    "mississauga", "ontario", "quebec", "québec", "british columbia", "alberta",
+    "nova scotia", "manitoba", "saskatchewan",
+    # The one European city in range, by request.
+    "london",
+)
+
+# Everything the sweep actually returns from outside the range, plus the obvious
+# neighbours. Only reached when nothing in IN_RANGE matched, so the UK cities
+# here cost nothing to the US cities that share their names.
+OUT_OF_RANGE = (
+    "singapore", "hong kong", "china", "shanghai", "beijing", "shenzhen",
+    "taiwan", "taipei", "japan", "tokyo", "osaka", "korea", "seoul",
+    "india", "mumbai", "bengaluru", "bangalore", "hyderabad", "pune", "chennai",
+    "gurgaon", "gurugram", "noida", "new delhi", "sri lanka", "colombo",
+    "philippines", "manila", "vietnam", "hanoi", "ho chi minh", "thailand",
+    "bangkok", "malaysia", "kuala lumpur", "indonesia", "jakarta",
+    "australia", "sydney", "melbourne", "new zealand", "auckland",
+    "netherlands", "amsterdam", "hoofddorp", "rotterdam", "the hague",
+    "france", "paris", "germany", "berlin", "munich", "frankfurt", "hamburg",
+    "ireland", "dublin", "switzerland", "zurich", "zürich", "geneva",
+    "spain", "madrid", "barcelona", "italy", "milan", "rome", "portugal",
+    "lisbon", "porto", "poland", "warsaw", "krakow", "kraków", "wroclaw",
+    "czech", "prague", "hungary", "budapest", "romania", "bucharest",
+    "serbia", "belgrade", "bulgaria", "sofia", "greece", "athens",
+    "sweden", "stockholm", "norway", "oslo", "denmark", "copenhagen",
+    "finland", "helsinki", "austria", "vienna", "belgium", "brussels",
+    "luxembourg", "iceland", "reykjavik", "estonia", "tallinn", "lithuania",
+    "latvia", "riga", "cyprus", "malta",
+    "israel", "tel aviv", "jerusalem", "haifa", "uae", "dubai", "abu dhabi",
+    "saudi", "riyadh", "qatar", "doha", "bahrain", "kuwait", "turkey",
+    "istanbul", "egypt", "cairo", "morocco", "casablanca",
+    "south africa", "johannesburg", "cape town", "nigeria", "lagos",
+    "kenya", "nairobi", "ghana", "accra",
+    "brazil", "são paulo", "sao paulo", "rio de janeiro", "argentina",
+    "buenos aires", "chile", "santiago", "colombia", "bogota", "bogotá",
+    "peru", "lima", "mexico", "mexico city", "guadalajara", "monterrey",
+    "costa rica", "panama", "uruguay", "montevideo",
+    "russia", "moscow", "ukraine", "kyiv", "kiev", "belarus", "kazakhstan",
+    # The UK and Ireland beyond London, which the range deliberately excludes.
+    "uk", "u.k", "united kingdom", "gb", "scotland", "wales", "northern ireland",
+    "edinburgh", "glasgow", "belfast", "cardiff", "bristol",
+    # Manchester and Birmingham are deliberately absent: New Hampshire and
+    # Alabama have one each, the boards write them the same way, and a bare
+    # "Manchester" is genuinely ambiguous. "uk" above catches the English ones.
+    "leeds", "liverpool", "sheffield", "oxford", "isle of man",
+    "emea", "apac", "latam",
+)
+
+_IN_RANGE_RE = re.compile("|".join(_word_regex(w).pattern for w in IN_RANGE), re.I)
+_OUT_OF_RANGE_RE = re.compile(
+    "|".join(_word_regex(w).pattern for w in OUT_OF_RANGE), re.I)
+
+
+def location_in_range(title: str, location: str) -> bool:
+    """Is this posting inside the US / Canada / London range?
+
+    Reads the title as well as the location field, because on several boards the
+    location field does not hold the location. Cloudflare files every posting
+    under "In-Office" and puts the city in the title ("Software Engineer Intern
+    (Fall 2026) - Austin, TX"); matching the location alone dropped all eleven of
+    its internships as unlocatable.
+
+    An unrecognised string is kept, not dropped. Capital One and NVIDIA file
+    multi-site postings as "2 Locations" and "8 Locations", which names no place
+    at all -- that is a board's formatting, not evidence of an out-of-range
+    office, and dropping it would silently lose real US roles. Those rows reach
+    the model, whose triage prompt carries the same range rule and can skip them.
+
+    There is no two-letter-code pass. It would have to be case-sensitive to keep
+    \bOR\b out of "New York, London, or Paris", and even then half the US state
+    codes are the ISO code of an excluded country -- NL, DE, IL, IN, CO, MA, PA,
+    PE -- so "Amsterdam, NL" would read as Newfoundland. Codes only ever decide
+    rows that no name matched, and those are kept anyway.
+    """
+    text = f"{title} {location}"
+    if _IN_RANGE_RE.search(text):
+        return True
+    return not _OUT_OF_RANGE_RE.search(text)
 # Query parameters that carry no identity. Everything else is kept, because on
 # several of these boards the query string IS the identity: Databricks, Stripe,
 # Jump Trading, Squarepoint, Gemini and Old Mission all point every posting at
