@@ -33,7 +33,7 @@ from ..brief import Brief, table
 from ..llm import LLMUnavailable
 from ..sources.prices import LAKE_STALE_DAYS, coverage_gap_days
 from ..store import Run, record
-from .base import AgentResult, Context
+from .base import AgentResult, Context, finalize
 
 log = logging.getLogger(__name__)
 
@@ -426,7 +426,7 @@ def run(ctx: Context, idea: str, *, symbols: list[str] | None = None,
 
     brief = build_brief(job, result, degradations=res.degradations)
     res.brief = brief
-    res.degradations = list(brief.degradations)
+    finalize(ctx, brief, res)
     res.artifact = brief.write(ctx.cfg.out_dir / NAME)
 
     if commit:

@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+# ...and its backups: `.env` is ignored but `.env.bak.<date>` was not,
+# and a backup of this file carries the live gateway key.
+.env.bak*
 
 # Everything under data/ is generated: the run log, the HTTP cache, the notes
 # repo (its own git repo), rendered briefs, and the analyst index — which holds

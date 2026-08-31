@@ -65,6 +65,15 @@ class Context:
             self._conn.close()
             self._conn = None
 
+    def llm_degradations(self) -> list[str]:
+        """LLM failures recorded *during* the run.
+
+        Separate from `base_degradations`, which is read before any model is
+        called and so can only report a missing key — never an endpoint that
+        answered 404 forty minutes later.
+        """
+        return list(self.llm.degradations)
+
     def base_degradations(self) -> list[str]:
         out = list(self.cfg.degradations())
         if self.offline:
@@ -74,3 +83,17 @@ class Context:
             if msg not in out and not any("no LLM" in o for o in out):
                 out.append(msg)
         return out
+
+
+def finalize(ctx: Context, brief: Brief, res: AgentResult) -> AgentResult:
+    """Fold late-breaking degradations into the brief, then mirror them onto the result.
+
+    Called after the sections are built, because the failures worth reporting
+    here are the ones that happen mid-run. Without it a brief could lose every
+    model-written section and still be stamped `degraded: false`, which is
+    exactly how a dead model name went unnoticed for weeks.
+    """
+    for d in ctx.llm_degradations():
+        brief.degrade(d)
+    res.degradations = list(brief.degradations)
+    return res

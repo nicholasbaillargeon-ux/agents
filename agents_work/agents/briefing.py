@@ -16,7 +16,7 @@ from ..llm import LLMUnavailable
 from ..sources.news import News
 from ..sources.prices import FUTURES, MACRO, YIELDS, PriceSource
 from ..store import Run, record
-from .base import AgentResult, Context
+from .base import AgentResult, Context, finalize
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +136,10 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     # brief a model wrote, so it is the only part that can be wrong about a
     # number the tables got right.
     lede, unverified = _lede(ctx, data)
+    if not lede and ctx.llm.available:
+        # The section the reader actually opens on a phone. Losing it silently
+        # is the whole reason this flag exists.
+        brief.degrade("overnight lede omitted")
     if lede:
         if unverified:
             lede += ("\n\n_Not found in this morning's tape or headlines: "
@@ -218,7 +222,7 @@ def run(ctx: Context, *, watchlist: list[str] | None = None, commit: bool = True
         return res
 
     res.brief = brief
-    res.degradations = list(brief.degradations)
+    finalize(ctx, brief, res)
     res.artifact = brief.write(ctx.cfg.out_dir / NAME)
     if commit:
         try:

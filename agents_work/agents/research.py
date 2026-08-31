@@ -21,7 +21,7 @@ from ..sources.edgar import Edgar
 from ..sources.news import News
 from ..sources.prices import PriceSource
 from ..store import Run, record
-from .base import AgentResult, Context
+from .base import AgentResult, Context, finalize
 
 log = logging.getLogger(__name__)
 
@@ -315,7 +315,7 @@ def run(ctx: Context, ticker: str, *, commit: bool = True) -> AgentResult:
         return res
 
     res.brief = brief
-    res.degradations = list(brief.degradations)
+    finalize(ctx, brief, res)
     path = brief.write(ctx.cfg.out_dir / NAME)
     res.artifact = path
 

@@ -31,7 +31,7 @@ from pathlib import Path
 from ..brief import Brief
 from ..llm import LLMUnavailable
 from ..store import Run, record
-from .base import AgentResult, Context
+from .base import AgentResult, Context, finalize
 
 log = logging.getLogger(__name__)
 
@@ -515,6 +515,7 @@ def run(ctx: Context, question: str, *, reindex: bool = False, k: int = DEFAULT_
     if answer.since:
         brief.extra_meta["window_since"] = answer.since
     res.brief = brief
+    finalize(ctx, brief, res)
     res.artifact = brief.write(ctx.cfg.out_dir / NAME)
     res.data.update({"citations": answer.citations, "search_only": answer.search_only,
                      "hits": len(answer.hits)})

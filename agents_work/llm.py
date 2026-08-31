@@ -40,6 +40,10 @@ class LLM:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.usage = Usage()
+        # Every distinct reason a call failed this run. `json()` swallows its
+        # exception and callers are free to catch theirs, so without this the
+        # only trace of a total outage was a log line nobody reads.
+        self.failures: list[str] = []
         # Why the last reply ended. "max_tokens" means it was cut off mid-sentence
         # and whatever the caller asked for last is simply missing.
         self.last_stop_reason: str | None = None
@@ -56,6 +60,23 @@ class LLM:
     def available(self) -> bool:
         return self._client is not None
 
+    def _unavailable(self, msg: str) -> LLMUnavailable:
+        """Record a failure, then hand back the exception for the caller to raise.
+
+        Routing every raise through here is what makes an outage visible: the
+        record outlives the exception, so a caller that degrades quietly — or
+        `json()`, which catches on the caller's behalf — still leaves something
+        the brief can report.
+        """
+        if msg not in self.failures:
+            self.failures.append(msg)
+        return LLMUnavailable(msg)
+
+    @property
+    def degradations(self) -> list[str]:
+        """One line per distinct failure, short enough for the degraded banner."""
+        return [f"LLM call failed: {_clip(m)}" for m in self.failures]
+
     def complete(
         self,
         prompt: str,
@@ -67,7 +88,7 @@ class LLM:
     ) -> str:
         """Return the text of one completion, or raise LLMUnavailable."""
         if self._client is None:
-            raise LLMUnavailable("no AGENTS_LLM_API_KEY configured")
+            raise self._unavailable("no AGENTS_LLM_API_KEY configured")
         model = model or (self.cfg.fast_model if fast else self.cfg.write_model)
         kwargs: dict = {
             "model": model,
@@ -79,15 +100,15 @@ class LLM:
         try:
             resp = self._client.messages.create(**kwargs)
         except anthropic.NotFoundError as e:
-            raise LLMUnavailable(f"model {model!r} not served by {self.cfg.llm_base_url}: {e}") from e
+            raise self._unavailable(f"model {model!r} not served by {self.cfg.llm_base_url}: {e}") from e
         except anthropic.AuthenticationError as e:
-            raise LLMUnavailable(f"rejected credentials for {self.cfg.llm_base_url}: {e}") from e
+            raise self._unavailable(f"rejected credentials for {self.cfg.llm_base_url}: {e}") from e
         except anthropic.RateLimitError as e:
-            raise LLMUnavailable(f"rate limited after retries: {e}") from e
+            raise self._unavailable(f"rate limited after retries: {e}") from e
         except anthropic.APIStatusError as e:
-            raise LLMUnavailable(f"HTTP {e.status_code} from LLM: {e}") from e
+            raise self._unavailable(f"HTTP {e.status_code} from LLM: {e}") from e
         except anthropic.APIConnectionError as e:
-            raise LLMUnavailable(f"cannot reach {self.cfg.llm_base_url}: {e}") from e
+            raise self._unavailable(f"cannot reach {self.cfg.llm_base_url}: {e}") from e
 
         self.last_stop_reason = getattr(resp, "stop_reason", None)
         if self.last_stop_reason == "max_tokens":
@@ -96,10 +117,10 @@ class LLM:
         if getattr(resp, "usage", None):
             self.usage = self.usage + Usage(resp.usage.input_tokens, resp.usage.output_tokens)
         if getattr(resp, "stop_reason", None) == "refusal":
-            raise LLMUnavailable("model declined the request")
+            raise self._unavailable("model declined the request")
         text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
         if not text.strip():
-            raise LLMUnavailable(f"empty completion from {model} (stop_reason={resp.stop_reason})")
+            raise self._unavailable(f"empty completion from {model} (stop_reason={resp.stop_reason})")
         return text.strip()
 
     def json(self, prompt: str, *, default, **kw):
@@ -113,7 +134,28 @@ class LLM:
         except LLMUnavailable as e:
             log.warning("llm.json unavailable: %s", e)
             return default
-        return parse_json(raw, default=default)
+        parsed = parse_json(raw, default=default)
+        if parsed is default:
+            # The call succeeded and the output was still unusable. Same loss to
+            # the reader as an outage, so it degrades the same way.
+            msg = f"unparseable JSON from {kw.get('model') or 'the model'}"
+            if msg not in self.failures:
+                self.failures.append(msg)
+        return parsed
+
+
+def _clip(msg: str, limit: int = 140) -> str:
+    """Gateway errors arrive with a JSON blob glued on; the banner wants a line.
+
+    The blob restates the status code in three nested layers and is what makes
+    the degraded banner unreadable, so it is cut at the brace rather than
+    truncated mid-token.
+    """
+    one = " ".join(str(msg).split())
+    head, sep, _ = one.partition(" - {")
+    if sep:
+        one = head
+    return one if len(one) <= limit else one[: limit - 1] + "…"
 
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
@@ -152,6 +194,7 @@ class FakeLLM(LLM):
         self.cfg = cfg
         self.usage = Usage()
         self._client = None
+        self.failures: list[str] = []
         self.prompts: list[str] = []
         self.last_stop_reason: str | None = None
         self._available = available
@@ -165,11 +208,15 @@ class FakeLLM(LLM):
     def complete(self, prompt: str, **kw) -> str:
         self.prompts.append(prompt)
         if not self._available:
-            raise LLMUnavailable("FakeLLM configured as unavailable")
+            raise self._unavailable("FakeLLM configured as unavailable")
         self.usage = self.usage + Usage(len(prompt) // 4, 32)
         if self._responses:
             nxt = self._responses.pop(0)
             if isinstance(nxt, Exception):
+                # Injected failures must record like real ones, or a test that
+                # stubs an outage would not exercise the degradation path.
+                if isinstance(nxt, LLMUnavailable):
+                    raise self._unavailable(str(nxt))
                 raise nxt
             return nxt
         return self.default_response

@@ -27,7 +27,7 @@ from ..llm import LLMUnavailable
 from ..sources.jobs import (REGISTRY, VENDOR_LABELS, Boards, Posting, days_open,
                             format_days_open, location_in_range, posting_key, score)
 from ..store import Run, mark_new, record, seen_count, seen_since, unseen_keys
-from .base import AgentResult, Context
+from .base import AgentResult, Context, finalize
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +200,15 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
                   tags=["internships", "search"])
     for d in ctx.base_degradations():
         brief.degrade(d)
+
+    # `rank` returns whatever the model managed and swallows the rest, so a
+    # short dict is the only evidence a batch failed. Say so: an unranked list
+    # is still ordered, but by score alone, and the reader should know the
+    # apply/maybe/skip column is missing rather than empty.
+    unranked = len(new_postings) - len(verdicts)
+    if use_llm and ctx.llm.available and new_postings and unranked > 0:
+        brief.degrade(f"{unranked} of {len(new_postings)} postings went unranked; "
+                      "ordering fell back to the deterministic score")
 
     # A board that answered carries a count; anything else is a hole in the
     # sweep. The reason travels with the name, because "unreachable" is a retry
@@ -380,7 +389,7 @@ def run(ctx: Context, *, commit: bool = True, **kw) -> AgentResult:
         return res
 
     res.brief = brief
-    res.degradations = list(brief.degradations)
+    finalize(ctx, brief, res)
     res.data = {"new": [p.as_dict() for p in data["new"]],
                 "scanned": len(data["all"]), "status": data["status"]}
     # No guard against overwriting: the digest is the day's union, so a run that
