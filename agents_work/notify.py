@@ -48,6 +48,26 @@ def clip(text: str, limit: int = MAX_BODY) -> str:
     return head.rstrip() + "\n\n…truncated — full brief on the dashboard."
 
 
+def lan_host() -> str:
+    """The LAN address the dashboard answers on, for a notification's tap target.
+
+    A notification whose click action is localhost is useless on a phone, and
+    the hostname this process sees is not the one the phone can route to. No
+    packet is sent — connecting a UDP socket just asks the routing table which
+    source address it would use.
+    """
+    import socket  # noqa: PLC0415 - only needed when a push is actually sent
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.168.1.1", 1))
+        addr = s.getsockname()[0]
+        s.close()
+        return addr
+    except OSError:
+        return "localhost"
+
+
 class Push:
     def __init__(self, topic: str | None, *, server: str = DEFAULT_SERVER,
                  timeout: float = 15.0, enabled: bool = True) -> None:

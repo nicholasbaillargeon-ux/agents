@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 from ..brief import Brief, table
 from ..grounding import ungrounded
 from ..llm import LLMUnavailable
+from ..notify import lan_host
 from ..sources.news import News
 from ..sources.prices import FUTURES, MACRO, YIELDS, PriceSource
 from ..store import Run, record
@@ -116,9 +117,10 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     for d in ctx.base_degradations():
         brief.degrade(d)
     if not ctx.push.available and not ctx.offline:
-        # This brief is the one built to be read on a phone, so a brief that
-        # was written but never pushed is a degraded brief — here, and nowhere
-        # else in the suite.
+        # This brief is built to be read on a phone, so one that was written
+        # and never sent is a degraded brief. The daily AI brief takes the same
+        # line for the same reason; the other five do not, because nothing about
+        # a comps table or a backtest depends on a phone.
         brief.degrade("no phone push configured: the tape was written but not sent")
     if today.weekday() >= 5:
         brief.degrade(MARKET_HOLIDAY_HINT)
@@ -211,24 +213,6 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     return brief, data
 
 
-def _host() -> str:
-    """The LAN address the dashboard answers on, for the push's tap target.
-
-    A notification whose click action is localhost is useless on a phone, and
-    the hostname this process sees is not the one the phone can route to.
-    """
-    import socket  # noqa: PLC0415 - only needed when a push is actually sent
-
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("192.168.1.1", 1))   # no packet is sent; this just picks a route
-        addr = s.getsockname()[0]
-        s.close()
-        return addr
-    except OSError:
-        return "localhost"
-
-
 def _tape_context(data: dict) -> str:
     """The equity tape, as one line, for the macro narration's prompt.
 
@@ -307,7 +291,7 @@ def run(ctx: Context, *, watchlist: list[str] | None = None, commit: bool = True
     pushed = ctx.push.send(
         tape.push_body(tape_data, equity_line),
         title=f"Morning tape - {brief.date}",
-        click=f"http://{_host()}:{ctx.cfg.port}/",
+        click=f"http://{lan_host()}:{ctx.cfg.port}/",
         tags="chart_with_upwards_trend", priority=4)
     if not pushed.sent and ctx.push.available:
         # Not configured is already reported by cfg.degradations(); configured

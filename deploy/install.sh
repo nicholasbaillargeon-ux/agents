@@ -6,7 +6,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNITS=(agents-web.service agents-briefing.service agents-briefing.timer
        agents-scout.service agents-scout.timer
        agents-dealbook.service agents-dealbook.timer
-       agents-comps.service agents-comps.timer)
+       agents-comps.service agents-comps.timer
+       agents-ainews.service agents-ainews.timer)
 
 for unit in "${UNITS[@]}"; do
   sudo install -m 0644 "$HERE/$unit" "/etc/systemd/system/$unit"
@@ -18,6 +19,7 @@ sudo systemctl enable --now agents-briefing.timer
 sudo systemctl enable --now agents-scout.timer
 sudo systemctl enable --now agents-dealbook.timer
 sudo systemctl enable --now agents-comps.timer
+sudo systemctl enable --now agents-ainews.timer
 
 echo
 systemctl --no-pager --lines=0 status agents-web.service | head -4

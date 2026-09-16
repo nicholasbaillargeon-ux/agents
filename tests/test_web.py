@@ -82,7 +82,8 @@ def test_health_reports_capabilities(client):
     payload = client.get("/api/health").json()
     assert payload["ok"] is True
     assert set(payload["capabilities"]) >= {"llm", "price_lake", "sandbox_image"}
-    assert set(payload["agents"]) == {"research", "backtest", "briefing", "scout", "analyst", "comps", "dealbook"}
+    assert set(payload["agents"]) == {"research", "backtest", "briefing", "scout",
+                                      "analyst", "comps", "dealbook", "ainews"}
     assert payload["agents"]["briefing"]["artifacts"] >= 1
 
 

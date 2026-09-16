@@ -17,7 +17,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 
 | # | Gate | Threshold |
 |---|------|-----------|
-| X1 | Every agent completes with no network and no LLM | 5/5 produce a non-empty artifact, none raise. The one exception is stated: a backtest with no model has no strategy code, and fails by name rather than inventing one |
+| X1 | Every agent completes with no network and no LLM | 6/6 produce a non-empty artifact, none raise. The one exception is stated: a backtest with no model has no strategy code, and fails by name rather than inventing one |
 | X2 | A degraded run says so | `degraded: true` in frontmatter **and** a `> Ran degraded` banner **and** the reasons in the run log |
 | X3 | One run, one row | each agent invocation writes exactly one `runs` row, success or failure |
 | X4 | No credential leaks | no rendered brief, run log row or API response contains the LLM key |
@@ -141,6 +141,23 @@ Each gate names the failure it exists to prevent. Several of them were written
 | D6 | Bank names survive the full stops inside them **(regression)** | "Goldman Sachs & Co. LLC" returned "LLC" under a sentence pattern bounded by `[^.]` |
 | D7 | Your annotation survives every later sweep | the agent refreshes what it knows; `my_view`, `status` and `reviewed_at` are never written by a sweep |
 | D8 | A watched advisor or sector overrides the size floor | the floor keeps tuck-ins out; the firm you are interviewing with is worth a page at any size |
+
+## 8 · Daily AI brief
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| N1 | One event reported nine times is one story | the lab's own post, a press rewrite and an aggregator copy fold into a single row, and the link is the lab's — a Google News `CBMi...` token cannot be resolved back to the publisher, so a direct link always wins |
+| N2 | "AI" is matched as a word, never a substring **(regression risk, inherited)** | Dubai, chair, said, email, Shanghai and HTML are not AI news. The scout scored a retail posting as an AI role exactly this way, and in a feed whose whole subject is a two-letter token, substring matching passes everything |
+| N3 | The other meanings of AI are refused | stock listicles, "best AI tools", parish and Coast Guard task forces and horoscopes all match an AI term and outnumbered the model releases on the first live sweep. Retail-investor outlets are refused by *outlet*, because "Anthropic IPO Date: What Investors Need to Know" contains no noise word at all |
+| N4 | Two stories about one lab do not become one **(regression)** | on any given day the lab's name is in a quarter of the headlines, so tokens carried by that much of the batch stop counting as identity. Without it, "Microsoft's AI chief warns Claude is risky" merged into Anthropic's own product launch and the warning left the page |
+| N5 | A story is reported once | the diff is the product. Identity is per headline, not per story, so tomorrow's follow-up joins a story already told instead of resurrecting it |
+| N6 | The day's page only grows **(regression, inherited)** | the brief renders the day's union rather than one run's delta, so a second run can add a story and can never drop one. The scout replaced a 104-row digest with a 29-row one before this became the rule |
+| N7 | A feed that could not be read is named, and a quiet one is not | unreachable / HTTP 429 / answered-with-no-items are three different jobs and travel with the feed's name. A lab that published nothing inside the window is *not* a failure: flagging it would put a degraded banner on every brief, and a warning that is always on is not a warning |
+| N8 | The model writes last, and is checked | stories, ordering and coverage are assembled before the model is asked anything; with no model the page renders without the commentary. Figures in its prose that the story list does not support are named, not removed |
+| N9 | A publisher's headline keeps its subtitle **(regression)** | only the aggregator appends " - Outlet", with a plain hyphen. Stripping any dash on every feed filed "and getting bigger" as the outlet of a Verge headline and truncated the headline at the dash |
+| N10 | An Atom feed is read like an RSS one **(regression)** | The Verge serves `<entry>` elements and everything else serves `<item>`. A parser that iterated `item` alone read it as empty, which is indistinguishable in the coverage table from a dead feed |
+| N11 | The push carries the headlines, not the links | a Google News redirect token runs to five hundred characters, so three of them would eat a third of ntfy's body limit and push the stories past the truncation — a lock screen of `CBMi...` and no news. The tap target is the brief on the dashboard, where every link already is |
+| N12 | A phone that did not buzz is reported | configured and failing is a degradation on the run; never configured is a degradation on the brief. A notification nobody received is the one failure a reader cannot notice for themselves (M12, for this agent) |
 
 ## 6 · Performance
 

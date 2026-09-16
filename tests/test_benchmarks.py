@@ -12,7 +12,7 @@ from dataclasses import replace
 
 import pytest
 
-from agents_work.agents import analyst, backtest, briefing, research, scout
+from agents_work.agents import ainews, analyst, backtest, briefing, research, scout
 from agents_work.agents.base import Context
 from agents_work.gitsink import NotesRepo
 from agents_work.llm import FakeLLM
@@ -30,6 +30,7 @@ def _run_all(ctx):
         "briefing": briefing.run(ctx, commit=False),
         "scout": scout.run(ctx, use_llm=False, commit=False),
         "analyst": analyst.run(ctx, "what did I conclude about NVDA", reindex=True),
+        "ainews": ainews.run(ctx, commit=False),
     }
 
 
@@ -39,7 +40,8 @@ def _run_all(ctx):
 def test_every_agent_completes_with_no_network_and_no_model(offline_ctx):
     """X1. Nothing raises, and every agent still writes a document."""
     results = _run_all(offline_ctx)
-    assert set(results) == {"research", "backtest", "briefing", "scout", "analyst"}
+    assert set(results) == {"research", "backtest", "briefing", "scout", "analyst",
+                           "ainews"}
     for name, res in results.items():
         assert res.ok, f"{name} failed: {res.error}"
         assert res.artifact and res.artifact.is_file(), f"{name} wrote no artifact"
@@ -93,9 +95,9 @@ def test_one_invocation_writes_exactly_one_run_row(offline_ctx):
     before = len(recent(offline_ctx.db, limit=500))
     _run_all(offline_ctx)
     rows = recent(offline_ctx.db, limit=500)
-    assert len(rows) - before == 5
-    assert sorted(r["agent"] for r in rows[:5]) == [
-        "analyst", "backtest", "briefing", "research", "scout"]
+    assert len(rows) - before == 6
+    assert sorted(r["agent"] for r in rows[:6]) == [
+        "ainews", "analyst", "backtest", "briefing", "research", "scout"]
 
 
 @pytest.mark.benchmark

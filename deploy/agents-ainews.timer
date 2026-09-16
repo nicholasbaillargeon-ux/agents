@@ -1,0 +1,24 @@
+[Unit]
+Description=Daily AI brief at 07:00
+# 07:00 America/New_York (the host's timezone), after the 06:30 tape has gone
+# to the phone and before the 07:15 deal book sweep. The tape is the thirty
+# seconds before the bell; this is the longer read, so it gets its own slot
+# rather than another section of that page.
+#
+# Seven days a week, unlike the market timers. AI releases land on Saturdays,
+# the feeds do not observe the trading calendar, and Sunday morning is when a
+# page like this actually gets read.
+#
+# Once a day, not hourly: the agent reads a 30-hour window and remembers every
+# headline it has already reported, so a second run of the same day mostly
+# costs a model call to re-write a lede over the same stories.
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+# A machine that was asleep at 07:00 still gets its brief on wake.
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

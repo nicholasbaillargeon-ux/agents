@@ -1,0 +1,17 @@
+[Unit]
+Description=agents_work daily AI brief
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nbaillar
+Group=nbaillar
+WorkingDirectory=/home/nbaillar/agents_work
+ExecStart=/home/nbaillar/agents_work/.venv/bin/agents ainews
+# A quiet day is a normal day, and a feed that did not answer is already
+# recorded in the run log, on the dashboard and in the brief's own Coverage
+# table. systemd has nothing useful to retry into.
+SuccessExitStatus=0 1
+TimeoutStartSec=600
+NoNewPrivileges=yes

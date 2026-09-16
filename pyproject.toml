@@ -1,7 +1,7 @@
 [project]
 name = "agents-work"
 version = "0.1.0"
-description = "Seven research/ops agents: research briefs, backtests, the morning tape, internship scouting, a personal RAG analyst, an EDGAR comps engine and an M&A deal book."
+description = "Eight research/ops agents: research briefs, backtests, the morning tape, internship scouting, a personal RAG analyst, an EDGAR comps engine, an M&A deal book and a daily AI news brief."
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "anthropic>=0.40",

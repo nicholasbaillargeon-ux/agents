@@ -41,6 +41,9 @@ AGENTS = {
     "scout": ("Internship scout", "Quant, bank, broker, exchange, fintech, AI and "
               "enterprise-IT boards swept nightly; only what is new since last run, "
               "with how long each posting has been open."),
+    "ainews": ("Daily AI brief", "Nine AI feeds swept every morning, folded into "
+               "one story per event and ordered by what it changes — with every "
+               "outlet that carried it named."),
     "analyst": ("Personal RAG analyst", "Questions answered from your own notes and "
                 "briefs, with citations."),
 }
@@ -307,7 +310,7 @@ def _page(title: str, body: str) -> str:
 <link rel="stylesheet" href="/static/style.css">
 </head><body>
 <nav><a class="brand" href="/">agents_work</a>
-<span class="sub">seven agents, one run log</span>
+<span class="sub">eight agents, one run log</span>
 <a href="/deals" class="sub">deal book</a></nav>
 <main>{body}</main>
 <footer class="page">Read-only view. Runs are owned by systemd timers and the

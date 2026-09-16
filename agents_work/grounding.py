@@ -21,8 +21,14 @@ import re
 # and "$10,000-to-$66,000" as negative sixty-six thousand. A hyphen only means
 # minus at the start of a token, never glued to the end of a word.
 _NUMBER = re.compile(
-    r"(?<![\w.])-?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bps?|[KMBT]\b)?", re.I)
+    r"(?<![\w.])-?\$?\d[\d,]*(?:\.\d+)?\s*"
+    r"(?:%|bps?|[KMBT]\b|(?:trillion|billion|million|thousand)\b)?", re.I)
 _SCALES = {"k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12}
+# The same magnitudes written out. News prose says "a $1.2 trillion valuation"
+# where a filing says "$1.2T", and a checker that reads the suffix but not the
+# word scores them a trillion apart — so the figure the dossier actually
+# contains gets flagged as unverified on every brief that mentions money.
+_WORD_SCALES = {"trillion": 1e12, "billion": 1e9, "million": 1e6, "thousand": 1e3}
 
 
 def _parse(token: str) -> tuple[float, int, float] | None:
@@ -34,7 +40,10 @@ def _parse(token: str) -> tuple[float, int, float] | None:
     """
     raw = token.strip().lower().replace("$", "").replace(",", "").replace(" ", "")
     scale = 1.0
-    if raw.endswith("bps"):
+    word = next((w for w in _WORD_SCALES if raw.endswith(w)), "")
+    if word:
+        raw, scale = raw[: -len(word)], _WORD_SCALES[word]
+    elif raw.endswith("bps"):
         raw, scale = raw[:-3], 0.01
     elif raw.endswith("bp"):
         raw, scale = raw[:-2], 0.01

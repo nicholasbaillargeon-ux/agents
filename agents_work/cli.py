@@ -1,4 +1,4 @@
-"""`agents` — one entry point for all five agents and for the timers."""
+"""`agents` — one entry point for every agent and for the timers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ import logging
 import sys
 from datetime import datetime
 
-from .agents import analyst, backtest, briefing, comps, dealbook, research, scout
+from .agents import (ainews, analyst, backtest, briefing, comps, dealbook,
+                     research, scout)
 from .agents.base import Context
 from .config import load_config
 from .netcache import prune_cache
@@ -93,6 +94,17 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--new-only", action="store_true", help="with --list, only unreviewed")
     d.add_argument("--max-enrich", type=int, default=dealbook.MAX_ENRICH)
     d.add_argument("--max-drafts", type=int, default=dealbook.MAX_DRAFTS)
+
+    n = sub.add_parser("ainews", help="the daily AI brief")
+    n.add_argument("--hours", type=float, default=ainews.WINDOW_HOURS,
+                   help="how far back to read the feeds (default %(default)s; wider "
+                        "than the daily cadence on purpose)")
+    n.add_argument("--limit", type=int, default=ainews.DISPLAY_LIMIT,
+                   help="how many new stories one brief will show")
+    n.add_argument("--top", type=int, default=ainews.TOP_STORIES,
+                   help="how many of them get a model sentence")
+    n.add_argument("--no-llm", action="store_true",
+                   help="stories and ordering only, no model commentary")
 
     a = sub.add_parser("ask", help="ask the RAG analyst")
     a.add_argument("question")
@@ -188,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
             return _print_result(comps.run(ctx, tickers, label=label, peer_note=note,
                                            commit=commit), as_json=args.json)
+        if args.cmd == "ainews":
+            return _print_result(ainews.run(
+                ctx, hours=args.hours, limit=args.limit, top=args.top,
+                use_llm=not args.no_llm, commit=commit), as_json=args.json)
         if args.cmd == "deals":
             return _deals(ctx, args, commit=commit)
         if args.cmd == "ask":
