@@ -115,6 +115,11 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
                   target=f"open-{today.isoformat()}", tags=["markets", "morning"])
     for d in ctx.base_degradations():
         brief.degrade(d)
+    if not ctx.push.available and not ctx.offline:
+        # This brief is the one built to be read on a phone, so a brief that
+        # was written but never pushed is a degraded brief — here, and nowhere
+        # else in the suite.
+        brief.degrade("no phone push configured: the tape was written but not sent")
     if today.weekday() >= 5:
         brief.degrade(MARKET_HOLIDAY_HINT)
 

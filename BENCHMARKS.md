@@ -126,6 +126,7 @@ Each gate names the failure it exists to prevent. Several of them were written
 | C2 | Unknown debt yields no enterprise value **(regression)** | an EV that treats unknown debt as zero is a market cap wearing a different label |
 | C3 | Medians are taken over the peers that have the metric **(regression)** | a blank is not a zero; averaging blanks in drags the median toward a multiple no peer trades at |
 | C4 | A negative denominator blanks the multiple | a loss-making company is not trading at −8x EBITDA |
+| C6 | Every median reports how many peers it rests on **(regression)** | the advisory set returns one EV/EBITDA out of seven names; a bold "12.6x" in a median row reads like a sector multiple rather than the single filer it is. Below three peers the brief degrades and says so |
 | C5 | A model-resolved peer set is checked against the SEC ticker file | a plausible ticker belonging to something else is harder to spot in a finished table than a missing one |
 
 ## 7 · Deal book

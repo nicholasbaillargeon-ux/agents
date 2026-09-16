@@ -123,5 +123,20 @@ def test_the_table_carries_a_median_row_and_renders_blanks_as_dashes():
     assert "—" in body
 
 
+@pytest.mark.benchmark
+def test_every_median_reports_how_many_peers_it_rests_on():
+    """C6 (regression). The advisory set returns one EV/EBITDA out of seven
+    names, and a bold "12.6x" in a median row reads like a sector multiple
+    rather than the single filer it is."""
+    rows = [_row(ticker="A", ebitda_ttm=10e9),
+            _row(ticker="B", ebitda_ttm=None),
+            _row(ticker="C", ebitda_ttm=None)]
+    assert comps.coverage(rows, "ev_ebitda") == 1
+    assert comps.coverage(rows, "pe") == 3
+    body = comps.comps_table(rows)
+    assert "peers with the metric" in body
+    assert "_1/3_" in body and "_3/3_" in body
+
+
 def test_an_empty_peer_set_still_renders():
     assert "No data" in comps.comps_table([])

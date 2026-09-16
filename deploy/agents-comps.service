@@ -11,7 +11,12 @@ WorkingDirectory=/home/nbaillar/agents_work
 # The set is an override, not a constant: change it with
 #   sudo systemctl edit agents-comps.service
 # and set Environment=AGENTS_COMPS_SET=semis
-Environment=AGENTS_COMPS_SET=advisory
+# `semis` and not `advisory`: the weekly run should produce a table worth
+# reading, and banks and independent advisors report no operating income line,
+# so an advisory set comes back with one EV/EBITDA out of seven names. Run
+# `agents comps --set advisory` by hand when the P/E and margin columns are
+# what you want.
+Environment=AGENTS_COMPS_SET=semis
 ExecStart=/bin/sh -c '/home/nbaillar/agents_work/.venv/bin/agents comps --set "$AGENTS_COMPS_SET"'
 SuccessExitStatus=0 1
 TimeoutStartSec=900

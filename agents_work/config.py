@@ -108,10 +108,13 @@ class Config:
             out.append(f"no parquet lake at {self.lake_dir}: backtests fall back to live download")
         if not any(p.is_dir() for p in self.vault_roots):
             out.append("no readable vault roots: the RAG analyst has nothing to index")
-        if not self.has_push:
-            out.append("no AGENTS_NTFY_TOPIC: the morning brief is written but not pushed")
-        if not self.has_dealbook:
-            out.append("no AGENTS_DEALBOOK_DSN: deals are not persisted to Postgres")
+        # Push and the deal book are deliberately NOT here. This list is copied
+        # into *every* brief, and an absent phone topic has nothing to do with a
+        # comps table or a backtest: adding them here stamped "no
+        # AGENTS_DEALBOOK_DSN" across the research, scout, backtest and comps
+        # briefs, which trains the reader to ignore the degraded banner — the
+        # one line that has to stay worth reading. The agents that use them
+        # report their own absence; `agents doctor` reports all of it.
         return out
 
     def ensure_dirs(self) -> None:

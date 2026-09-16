@@ -37,6 +37,17 @@ NAME = "comps"
 # Curated sets, chosen for clean XBRL rather than for sector coverage. Every
 # one of these was run before it was added; the ones that do not resolve (oil
 # majors, most banks) are deliberately absent and listed in KNOWN_HARD.
+# Sets whose filers are in KNOWN_HARD territory, so a thin table is the
+# expected result rather than a fault. Named here so the brief can say so
+# rather than leaving the reader to wonder what broke.
+THIN_BY_CONSTRUCTION = {
+    "advisory": "independent advisors and the bulge brackets report no "
+                "operating income line, so most of this set has no EBITDA and "
+                "no EV — the P/E and margin columns are the usable ones",
+    "exchanges": "exchange operators carry clearing-member balances that make "
+                 "a debt-based EV bridge misleading",
+}
+
 PEER_SETS: dict[str, list[str]] = {
     "megacap-tech": ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "NVDA"],
     "semis": ["NVDA", "AMD", "AVGO", "QCOM", "TXN", "ADI", "MU"],
@@ -155,6 +166,16 @@ def _money(v: float | None) -> str:
     return f"${v:,.0f}"
 
 
+# Below this many peers, a median is an anecdote. The number is reported
+# alongside every median so a one-name "median" cannot be read as a peer group.
+THIN_MEDIAN = 3
+
+
+def coverage(rows: list[CompRow], attr: str) -> int:
+    """How many peers actually have this metric."""
+    return sum(1 for r in rows if getattr(r, attr) is not None)
+
+
 def median_of(rows: list[CompRow], attr: str) -> float | None:
     """Median across the peers that actually have the metric.
 
@@ -221,6 +242,13 @@ def comps_table(rows: list[CompRow]) -> str:
         body.append(["**Median**", "", "", ""]
                     + [f"**{_fmt(median_of(live, attr), unit, places)}**"
                        for _, attr, unit, places in METRICS])
+        # The count each median rests on, in its own row. A median is only a
+        # peer benchmark if there are peers: the advisory set returns one
+        # EV/EBITDA out of seven names, and "12.6x" in a bold median row reads
+        # like a sector multiple rather than the single company it is.
+        body.append(["_peers with the metric_", "", "", ""]
+                    + [f"_{coverage(live, attr)}/{len(live)}_"
+                       for _, attr, _u, _p in METRICS])
     return table(headers, body, align=["---"] + ["---:"] * (len(headers) - 1))
 
 
@@ -307,7 +335,11 @@ def build_brief(ctx: Context, tickers: list[str], *, label: str = "",
     for d in ctx.base_degradations():
         brief.degrade(d)
     if peer_note:
-        brief.add("Peer set", f"{', '.join(tickers)}\n\n_{peer_note}_")
+        body = f"{', '.join(tickers)}\n\n_{peer_note}_"
+        caveat = THIN_BY_CONSTRUCTION.get(label)
+        if caveat:
+            body += f"\n\n**Expect a thin table here:** {caveat}."
+        brief.add("Peer set", body)
 
     rows, degradations = build_rows(ctx, tickers)
     for d in degradations:
@@ -325,6 +357,17 @@ def build_brief(ctx: Context, tickers: list[str], *, label: str = "",
         brief.degrade("comps commentary omitted")
 
     brief.add("Comparable companies", comps_table(rows))
+    live = [r for r in rows if r.ok]
+    thin = [label for label, attr, _u, _p in METRICS
+            if 0 < coverage(live, attr) < THIN_MEDIAN]
+    empty = [label for label, attr, _u, _p in METRICS if coverage(live, attr) == 0]
+    if thin:
+        brief.degrade(
+            "median rests on fewer than "
+            f"{THIN_MEDIAN} peers for: {', '.join(thin)} — read those as a "
+            "single filer, not a sector benchmark")
+    if empty:
+        brief.degrade(f"no peer in this set reports: {', '.join(empty)}")
     brief.add("Enterprise value bridge", bridge_table(rows))
 
     footnotes = [f"- **{r.ticker}** — {n}" for r in rows for n in r.notes]
