@@ -205,6 +205,38 @@ INTERN_PATTERNS = re.compile(
     r"graduate\s+(?:analyst|program(?:me)?|scheme|role|position)|"
     r"rotational\s+program(?:me)?)\b", re.I)
 
+# --- Degree-level gate ----------------------------------------------------
+# The candidate is an undergraduate, so a posting that requires an advanced
+# degree is not a weaker match — it is not a match. Added 2026-09-15.
+#
+# Matched on the title alone, which is all the boards reliably give, and the
+# limits of that are worth stating: a posting titled "Quantitative Research
+# Intern" whose body says "PhD candidates only" reads as undergraduate here and
+# reaches the model, whose triage prompt carries the same rule. This gate exists
+# to catch the ones that say it out loud, which is most of them.
+#
+# `graduate` on its own is deliberately absent and must stay absent. "Graduate
+# Analyst Programme" and "new graduate" are what banks call the roles a final-
+# year undergraduate applies to — denying the bare word would delete the exact
+# population this scout exists to find. Only the phrases that can only mean a
+# postgraduate qualification are listed.
+GRADUATE_ONLY = re.compile(
+    r"\b(ph\.?\s?d\.?|doctoral|doctorate|post-?doctoral|post-?doc|"
+    r"m\.?b\.?a\.?|master'?s|masters(?:\s+degree)?|m\.?sc\.?|m\.?eng\.?|"
+    r"graduate\s+student|grad\s+student|advanced\s+degree|"
+    r"(?:phd|masters?)\s*/\s*(?:phd|masters?))\b", re.I)
+
+
+def is_undergraduate(title: str) -> bool:
+    """Is this open to an undergraduate?
+
+    False only when the title names a qualification an undergraduate does not
+    have. Silence means yes: most internship titles say nothing about degree
+    level, and treating that as exclusion would empty the brief.
+    """
+    return not GRADUATE_ONLY.search(title)
+
+
 # Words that mean "this is the kind of work the user is aiming at".
 RELEVANT = {
     "quantitative": 3, "quant": 3, "trading": 3, "trader": 3, "research": 2,
@@ -263,10 +295,10 @@ _METRO_RE = re.compile(
 
 
 # --- Geography gate -------------------------------------------------------
-# Range is the United States, Canada and London. A hard filter, not a score
-# penalty: a Singapore desk is not a weaker match than a New York one, it is not
-# a match at all, and the last sweep carried 19 Singapore rows the model still
-# paid to triage.
+# Range is the United States, and only the United States (narrowed 2026-09-15;
+# it was US + Canada + London). A hard filter, not a score penalty: a Singapore
+# desk is not a weaker match than a New York one, it is not a match at all, and
+# the last sweep carried 19 Singapore rows the model still paid to triage.
 #
 # Allow is tested before deny, and both are whole-word. That ordering is the
 # whole design. It is what makes multi-site postings work -- "London; Amsterdam"
@@ -297,13 +329,10 @@ IN_RANGE = (
     "las vegas", "minneapolis", "detroit", "ann arbor", "columbus", "cleveland",
     "pittsburgh", "philadelphia", "baltimore", "arlington", "reston", "mclean",
     "nashville", "st. louis", "saint louis", "kansas city", "madison",
-    # Canada.
-    "canada", "canadian", "toronto", "montreal", "montréal", "vancouver",
-    "ottawa", "calgary", "edmonton", "winnipeg", "waterloo", "kitchener",
-    "mississauga", "ontario", "quebec", "québec", "british columbia", "alberta",
-    "nova scotia", "manitoba", "saskatchewan",
-    # The one European city in range, by request.
-    "london",
+    "washington dc", "washington, d.c", "district of columbia",
+    # Canada and London were here until 2026-09-15 and are now denied below.
+    # Puerto Rico is US soil and stays in range.
+    "puerto rico", "san juan, pr",
 )
 
 # Everything the sweep actually returns from outside the range, plus the obvious
@@ -338,8 +367,25 @@ OUT_OF_RANGE = (
     "peru", "lima", "mexico", "mexico city", "guadalajara", "monterrey",
     "costa rica", "panama", "uruguay", "montevideo",
     "russia", "moscow", "ukraine", "kyiv", "kiev", "belarus", "kazakhstan",
-    # The UK and Ireland beyond London, which the range deliberately excludes.
-    "uk", "u.k", "united kingdom", "gb", "scotland", "wales", "northern ireland",
+    # Canada, out of range since 2026-09-15. Only the names that are
+    # unambiguously Canadian are listed: Vancouver (WA), Waterloo (IA),
+    # Ontario (CA) and London (KY, OH) are all US places too, and the existing
+    # Manchester/Birmingham precedent applies — a name on both sides of the
+    # border is left out of the deny list, so those rows fall through to
+    # "unrecognised, therefore kept" rather than being dropped wrongly. The
+    # province names below still catch "Vancouver, British Columbia" and
+    # "Waterloo, Ontario", which is how the boards actually write them.
+    "canada", "canadian", "toronto", "montreal", "montréal", "ottawa",
+    "calgary", "edmonton", "winnipeg", "kitchener", "mississauga", "brampton",
+    "quebec", "québec", "british columbia", "alberta", "nova scotia",
+    "manitoba", "saskatchewan", "newfoundland", "new brunswick",
+    # The UK and Ireland, all of it. London was the one European city in range
+    # until 2026-09-15; it is denied by name now. London, Kentucky and London,
+    # Ohio exist and are genuinely lost by this, which is the right trade: on
+    # these boards a bare "London" is the City every time, and the two US
+    # Londons have never appeared in a sweep.
+    "london", "uk", "u.k", "united kingdom", "gb", "scotland", "wales",
+    "northern ireland",
     "edinburgh", "glasgow", "belfast", "cardiff", "bristol",
     # Manchester and Birmingham are deliberately absent: New Hampshire and
     # Alabama have one each, the boards write them the same way, and a bare
@@ -354,7 +400,7 @@ _OUT_OF_RANGE_RE = re.compile(
 
 
 def location_in_range(title: str, location: str) -> bool:
-    """Is this posting inside the US / Canada / London range?
+    """Is this posting sited in the United States?
 
     Reads the title as well as the location field, because on several boards the
     location field does not hold the location. Cloudflare files every posting
@@ -369,9 +415,11 @@ def location_in_range(title: str, location: str) -> bool:
     the model, whose triage prompt carries the same range rule and can skip them.
 
     There is no two-letter-code pass. It would have to be case-sensitive to keep
-    \bOR\b out of "New York, London, or Paris", and even then half the US state
-    codes are the ISO code of an excluded country -- NL, DE, IL, IN, CO, MA, PA,
-    PE -- so "Amsterdam, NL" would read as Newfoundland. Codes only ever decide
+    \bOR\b out of "New York or Paris", and even then half the US state codes are
+    the ISO code of an excluded country -- NL, DE, IL, IN, CO, MA, PA, PE -- so
+    "Amsterdam, NL" would read as Newfoundland. That trap got worse when Canada
+    left the range: "Toronto, ON" and "Ontario, CA" are now on opposite sides of
+    the line and differ only by a code this cannot safely read. Codes only ever decide
     rows that no name matched, and those are kept anyway.
     """
     text = f"{title} {location}"

@@ -9,7 +9,8 @@ from datetime import date, datetime, time as dtime, timedelta, timezone
 import pytest
 
 from agents_work.agents import scout
-from agents_work.sources.jobs import Boards, Posting, location_in_range, score
+from agents_work.sources.jobs import (Boards, Posting, is_undergraduate,
+                                       location_in_range, score)
 from agents_work.store import mark_new, seen_count
 
 REGISTRY = (("greenhouse", "quantco", "QuantCo", "quant"),
@@ -1004,9 +1005,15 @@ def _titles(ctx, fetcher, payload, **kw):
 @pytest.mark.benchmark
 @pytest.mark.parametrize("location,wanted", [
     ("New York, NY, United States", True),
-    ("Toronto, ON", True),
-    ("London", True),
     ("Chicago; New York", True),
+    ("San Juan, Puerto Rico", True),
+    # Narrowed to the US on 2026-09-15. Canada and London were in range until
+    # then, so these three are the behaviour change, not an oversight.
+    ("Toronto, ON", False),
+    ("Montreal, QC", False),
+    ("London", False),
+    ("London, United Kingdom", False),
+    ("Vancouver, British Columbia", False),
     ("Singapore", False),
     ("Hong Kong", False),
     ("Amsterdam, Netherlands", False),
@@ -1014,20 +1021,76 @@ def _titles(ctx, fetcher, payload, **kw):
     ("Mexico City, Distrito Federal, Mexico", False),
     ("Dublin, Ireland", False),
 ])
-def test_the_range_is_the_us_canada_and_london(location, wanted):
+def test_the_range_is_the_united_states(location, wanted):
     """S20: every one of these is a location string the live sweep returned."""
     assert location_in_range("Quantitative Trading Intern", location) is wanted
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize("location", [
-    "London; Amsterdam", "New York, London, or Paris",
-    "London, Paris, Hong Kong, Tokyo", "Chicago, Florida, New York, San Francisco",
+    "Vancouver, WA", "Manchester, NH", "Birmingham, AL", "Waterloo, IA",
+])
+def test_a_city_name_shared_with_canada_or_the_uk_is_still_kept(location):
+    """S20: the deny list names only unambiguously foreign places. Vancouver,
+    Waterloo, Manchester and Birmingham all exist in the US and the boards
+    write them the same way, so they fall through to 'unrecognised, therefore
+    kept' rather than being dropped on a guess."""
+    assert location_in_range("Software Engineer Intern", location)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("location", [
+    "New York, London, or Paris", "Chicago, Florida, New York, San Francisco",
+    "Boston; Amsterdam", "New York, Paris, Hong Kong, Tokyo",
 ])
 def test_a_posting_counts_if_any_of_its_sites_is_in_range(location):
     """S20: firms list a whole desk's offices in one field. Rejecting the row
-    because Tokyo is on it would reject the London seat that is on it too."""
+    because Tokyo is on it would reject the New York seat that is on it too."""
     assert location_in_range("Summer Analyst", location)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("title", [
+    "PhD Research Intern", "Ph.D. Quantitative Researcher Intern",
+    "MBA Summer Associate", "Master's Intern, Machine Learning",
+    "MSc Data Science Intern", "Doctoral Intern, Applied Science",
+    "PhD/Masters Research Intern",
+])
+def test_an_advanced_degree_posting_is_not_for_this_candidate(title):
+    """S22: the candidate is an undergraduate, so a posting requiring a PhD, a
+    master's or an MBA is not a weaker match — it is not a match."""
+    assert is_undergraduate(title) is False
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("title", [
+    "Graduate Analyst Programme", "New Graduate Software Engineer",
+    "2027 Summer Analyst", "Software Engineer Intern", "Sophomore Insight Programme",
+    "Technology Analyst Program", "New Grad Engineer",
+])
+def test_graduate_entry_titles_are_undergraduate_roles(title):
+    """S22 (regression). `graduate` alone must never gate: 'Graduate Analyst
+    Programme' and 'new graduate' are what banks call the roles a final-year
+    undergraduate applies to. Denying the bare word would delete the exact
+    population this scout exists to find."""
+    assert is_undergraduate(title) is True
+
+
+@pytest.mark.benchmark
+def test_the_degree_gate_runs_before_the_model(ctx, fetcher):
+    """S22: an advanced-degree posting costs no verdict, on the same terms as
+    an out-of-range one."""
+    fetcher.route("boards/quantco/jobs", {"jobs": [
+        {"title": "Quantitative Trading Intern", "location": {"name": "New York, NY"},
+         "absolute_url": "https://x.com/jobs/1",
+         "first_published": f"{_days_ago(2).isoformat()}T00:00:00Z"},
+        {"title": "PhD Quantitative Research Intern", "location": {"name": "New York, NY"},
+         "absolute_url": "https://x.com/jobs/2",
+         "first_published": f"{_days_ago(2).isoformat()}T00:00:00Z"}]})
+    brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
+    titles = [p.title for p in data["new"]]
+    assert titles == ["Quantitative Trading Intern"]
+    assert "1 named a PhD, master's or MBA and are not shown" in brief.render()
 
 
 @pytest.mark.benchmark
@@ -1117,6 +1180,6 @@ def test_the_brief_shows_what_each_gate_removed(ctx, fetcher):
     brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=False)
     assert len(data["new"]) == 1
     text = brief.render()
-    assert "United States, Canada or London" in text
+    assert "sited in the United States" in text
     assert "opened within the last 21 days" in text
     assert "1 were older and are not shown" in text

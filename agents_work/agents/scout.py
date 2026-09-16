@@ -25,7 +25,8 @@ from datetime import date, datetime, timezone
 from ..brief import Brief, table
 from ..llm import LLMUnavailable
 from ..sources.jobs import (REGISTRY, VENDOR_LABELS, Boards, Posting, days_open,
-                            format_days_open, location_in_range, posting_key, score)
+                            format_days_open, is_undergraduate, location_in_range,
+                            posting_key, score)
 from ..store import Run, mark_new, record, seen_count, seen_since, unseen_keys
 from .base import AgentResult, Context, finalize
 
@@ -59,11 +60,15 @@ SYSTEM = (
     "array of objects with keys `url`, `verdict` (one of: apply, maybe, skip), "
     "and `why` (at most 15 words, concrete). Judge fit, not prestige. A posting "
     "that is senior, non-technical, or in an unrelated function is `skip` even "
-    "at a famous firm. The candidate will only work in the United States, "
-    "Canada, or London: `skip` anything sited elsewhere, and where a posting "
-    "names several offices, judge it on the ones in that range. Some boards "
+    "at a famous firm. The candidate will only work in the United States: "
+    "`skip` anything sited elsewhere, including Canada and London, and where a "
+    "posting names several offices, judge it on the US ones. Some boards "
     "publish no usable location at all -- treat those on their merits rather "
-    "than assuming the worst. `days_open` is how long the posting has been "
+    "than assuming the worst. The candidate is an undergraduate: `skip` "
+    "anything requiring a PhD, a master's or an MBA, however good the fit "
+    "otherwise. Note that 'graduate analyst', 'graduate programme' and 'new "
+    "graduate' are undergraduate-entry roles at banks and are NOT postgraduate "
+    "-- do not skip those. `days_open` is how long the posting has been "
     "live; every posting you are shown opened within the last three weeks, so "
     "use it only to break ties between otherwise equal roles. Return ONLY the "
     "JSON array."
@@ -161,11 +166,16 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
     # verdict: the last sweep carried 19 Singapore rows and 99 postings older
     # than three weeks that the model was paying to read and reject.
     in_range = [p for p in qualifying if location_in_range(p.title, p.location)]
+    # Degree level, on the same terms as range: an advanced-degree posting is
+    # not a weaker match, it is not a match, so it is filtered before `rank`
+    # rather than penalised in `score` — and costs no verdict.
+    undergrad = [p for p in in_range if is_undergraduate(p.title)]
+    postgrad_only = len(in_range) - len(undergrad)
     # Counted, not hidden: these are the rows the gate let through without ever
     # confirming a place, and the reader deserves to know how much of the range
     # line rests on them.
     unlocated = sum(1 for p in in_range if _names_no_place(p.location))
-    candidates = [p for p in in_range if _fresh_enough(p, max_days_open)]
+    candidates = [p for p in undergrad if _fresh_enough(p, max_days_open)]
     candidates.sort(key=lambda p: -p.score)
 
     # Claim only what this brief will actually show. Marking every candidate
@@ -286,14 +296,16 @@ def build_brief(ctx: Context, *, registry=REGISTRY, min_score: int = 4,
         f"across {len(vendors)} ATS vendors ({', '.join(vendor_names)})\n"
         f"- {len(qualifying)} passed the keyword filter "
         f"(score ≥ {min_score}{', internship titles only' if internships_only else ''})\n"
-        f"- {len(in_range)} of those are sited in the United States, Canada or "
-        f"London"
+        f"- {len(in_range)} of those are sited in the United States"
         + (f", counting {unlocated} whose board publishes no usable location"
            if unlocated else "")
+        + f"\n- {len(undergrad)} of those are open to an undergraduate"
+        + (f"; {postgrad_only} named a PhD, master's or MBA and are not shown"
+           if postgrad_only else "")
         + f"\n- {len(candidates)} of those opened within the last "
         f"{max_days_open} days"
-        + (f"; {len(in_range) - len(candidates)} were older and are not shown"
-           if len(candidates) < len(in_range) else "")
+        + (f"; {len(undergrad) - len(candidates)} were older and are not shown"
+           if len(candidates) < len(undergrad) else "")
         + "\n"
         f"- {len(new_postings)} shown as new this run "
         f"({len(surfaced)} surfaced today in total)"
