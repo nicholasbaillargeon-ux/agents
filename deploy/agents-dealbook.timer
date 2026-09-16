@@ -1,0 +1,19 @@
+[Unit]
+Description=M&A deal book sweep, twice on trading days
+# 07:15 catches the overnight and pre-open announcements, after the 06:30 tape
+# has already gone to the phone. 17:15 catches the after-close releases, which
+# is when most US deals are actually announced.
+#
+# Twice, not hourly: the feeds carry at most a hundred items, a deal already in
+# the book is never re-read by a model, and the point of the book is fifteen
+# deals you have a view on — not every tuck-in of the day.
+
+[Timer]
+OnCalendar=Mon-Fri 07:15
+OnCalendar=Mon-Fri 17:15
+Persistent=true
+AccuracySec=5min
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

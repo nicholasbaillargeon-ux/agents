@@ -1,5 +1,5 @@
 [Unit]
-Description=agents_work market open briefing
+Description=agents_work morning tape and market open briefing
 After=network-online.target
 Wants=network-online.target
 

@@ -40,6 +40,16 @@ class Config:
     watchlist: list[str]
     vault_roots: list[Path]
     port: int
+    ntfy_topic: str | None = None
+    ntfy_server: str = "https://ntfy.sh"
+    # Advisors worth a flag in the deal book. The point of the list is the
+    # firm you are interviewing with, so it is config, not a constant.
+    deal_advisors: list[str] = field(default_factory=list)
+    deal_min_usd: float = 0.0
+    # Sectors worth a page regardless of size. The size floor exists to keep
+    # tuck-ins out; this is the exception for the ones you would read anyway.
+    deal_sectors: list[str] = field(default_factory=list)
+    dealbook_dsn: str | None = None
     http_cache_ttl: int = 900
     # Cap on the on-disk response cache. Sized well above a steady-state
     # sweep (one nightly scout is ~40MB of overwrites) so the cap only ever
@@ -74,6 +84,14 @@ class Config:
         return bool(self.llm_api_key)
 
     @property
+    def has_push(self) -> bool:
+        return bool(self.ntfy_topic)
+
+    @property
+    def has_dealbook(self) -> bool:
+        return bool(self.dealbook_dsn)
+
+    @property
     def has_lake(self) -> bool:
         return self.lake_dir.is_dir()
 
@@ -90,6 +108,10 @@ class Config:
             out.append(f"no parquet lake at {self.lake_dir}: backtests fall back to live download")
         if not any(p.is_dir() for p in self.vault_roots):
             out.append("no readable vault roots: the RAG analyst has nothing to index")
+        if not self.has_push:
+            out.append("no AGENTS_NTFY_TOPIC: the morning brief is written but not pushed")
+        if not self.has_dealbook:
+            out.append("no AGENTS_DEALBOOK_DSN: deals are not persisted to Postgres")
         return out
 
     def ensure_dirs(self) -> None:
@@ -112,6 +134,14 @@ def load_config(**overrides) -> Config:
         watchlist=_csv(os.getenv("AGENTS_WATCHLIST", "SPY,QQQ,AAPL,MSFT,NVDA")),
         vault_roots=_paths(os.getenv("AGENTS_VAULT_ROOTS", str(data_dir / "research-notes"))),
         port=int(os.getenv("AGENTS_PORT", "8110")),
+        ntfy_topic=os.getenv("AGENTS_NTFY_TOPIC") or None,
+        ntfy_server=os.getenv("AGENTS_NTFY_SERVER", "https://ntfy.sh"),
+        deal_advisors=[s.strip() for s in os.getenv(
+            "AGENTS_DEAL_ADVISORS", "Cantor Fitzgerald,Cantor").split(",") if s.strip()],
+        deal_min_usd=float(os.getenv("AGENTS_DEAL_MIN_USD", "250000000")),
+        deal_sectors=[s.strip().lower() for s in os.getenv(
+            "AGENTS_DEAL_SECTORS", "").split(",") if s.strip()],
+        dealbook_dsn=os.getenv("AGENTS_DEALBOOK_DSN") or None,
         http_cache_ttl=int(os.getenv("AGENTS_HTTP_CACHE_TTL", "900")),
         http_cache_max_mb=int(os.getenv("AGENTS_HTTP_CACHE_MAX_MB", "256")),
     )

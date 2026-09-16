@@ -67,8 +67,18 @@ class FakeFetcher(Fetcher):
 
 @pytest.fixture
 def lake(tmp_path) -> Path:
-    """A synthetic Parquet lake shaped exactly like market-lab's."""
+    """A synthetic Parquet lake shaped exactly like market-lab's.
+
+    Shaped includes its *permissions*. The backtest sandbox bind-mounts the
+    lake into a container that runs as uid 10001, and pytest's tmp_path is
+    0700 owned by the test runner, so a lake built here with default modes is
+    unreadable inside the container even though the real one — 775 dirs, 664
+    files — is fine. Without this the sandbox tests fail with a permission
+    error on a parquet shard that looks like a bug in the generated strategy.
+    """
     root = tmp_path / "lake"
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o755)
     rng = np.random.default_rng(7)
     for symbol in ("SPY", "QQQ"):
         n = 800
@@ -84,6 +94,8 @@ def lake(tmp_path) -> Path:
         d = root / f"symbol={symbol}"
         d.mkdir(parents=True)
         df.to_parquet(d / f"{symbol}.parquet")
+        d.chmod(0o755)
+        (d / f"{symbol}.parquet").chmod(0o644)
     return root
 
 

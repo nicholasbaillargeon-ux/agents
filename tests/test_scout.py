@@ -22,7 +22,16 @@ REGISTRY = (("greenhouse", "quantco", "QuantCo", "quant"),
 # them; `scout.MAX_DAYS_OPEN` reads them now, so a literal is a test that passes
 # this month and fails in October for no reason anyone will remember.
 def _days_ago(n: int) -> date:
-    return date.today() - timedelta(days=n)
+    """n days before *UTC* today, which is the clock the code uses.
+
+    `date.today()` is local. `jobs.days_open` measures against
+    `datetime.now(timezone.utc).date()`. East of UTC-0 those are the same date
+    for most of the day and differ after evening local time, so a fixture built
+    as "21 days ago" became 22 days old — and the boundary test failed every
+    evening after 20:00 EDT and passed again by morning. A test whose result
+    depends on the hour it is run is worse than one that simply fails.
+    """
+    return datetime.now(timezone.utc).date() - timedelta(days=n)
 
 
 def greenhouse(*titles):
@@ -321,11 +330,11 @@ def test_verdicts_attach_when_identity_lives_in_the_query_string(ctx, fetcher):
         {"title": "Quantitative Trading Internship (Summer 2027)",
          "location": {"name": "Chicago, IL"},
          "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=7982619",
-         "updated_at": "2026-08-19T10:00:00Z"},
+         "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"},
         {"title": "Campus Quantitative Research Intern",
          "location": {"name": "New York, NY"},
          "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=7848371",
-         "updated_at": "2026-08-19T10:00:00Z"}]})
+         "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}]})
     ctx.llm.default_response = (
         '[{"url": "https://www.jumptrading.com/hr/job?gh_jid=7982619",'
         ' "verdict": "apply", "why": "exactly the target role"},'
@@ -344,7 +353,7 @@ def test_verdicts_survive_the_model_re_adding_a_tracking_parameter(ctx, fetcher)
     """S7."""
     fetcher.route("boards/quantco/jobs", {"jobs": [{
         "title": "Quant Research Intern", "location": {"name": "NYC"},
-        "absolute_url": "https://x.com/jobs/1", "updated_at": "2026-08-19T10:00:00Z"}]})
+        "absolute_url": "https://x.com/jobs/1", "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}]})
     ctx.llm.default_response = (
         '[{"url": "https://x.com/jobs/1/?utm_source=chat", "verdict": "maybe",'
         ' "why": "adjacent"}]')
@@ -358,10 +367,10 @@ def test_an_ambiguous_verdict_url_is_dropped_not_guessed(ctx, fetcher):
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": "Quant Trading Intern", "location": {"name": "NYC"},
          "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=1",
-         "updated_at": "2026-08-19T10:00:00Z"},
+         "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"},
         {"title": "Quant Research Intern", "location": {"name": "NYC"},
          "absolute_url": "https://www.jumptrading.com/hr/job?gh_jid=2",
-         "updated_at": "2026-08-19T10:00:00Z"}]})
+         "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}]})
     ctx.llm.default_response = (
         '[{"url": "https://www.jumptrading.com/hr/job", "verdict": "apply", "why": "x"}]')
     _, data = scout.build_brief(ctx, registry=REGISTRY[:1], use_llm=True)
@@ -391,7 +400,7 @@ def test_only_displayed_postings_are_marked_seen(ctx, fetcher):
     as "nothing new"."""
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
-         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}
         for i in range(10)]})
 
     brief, data = scout.build_brief(ctx, registry=REGISTRY[:1], limit=4, use_llm=False)
@@ -422,7 +431,7 @@ def test_every_displayed_row_is_ranked(ctx, fetcher):
     so five carried a dash while the summary claimed verdicts were assigned."""
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
-         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}
         for i in range(25)]})
     ctx.llm.default_response = json.dumps([
         {"url": f"https://x.com/jobs/{i}", "verdict": "apply", "why": "fit"}
@@ -439,7 +448,7 @@ def test_partial_ranking_is_declared(ctx, fetcher):
     """S9: when the model genuinely answers for only some rows, say how many."""
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
-         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}
         for i in range(4)]})
     ctx.llm.default_response = json.dumps(
         [{"url": "https://x.com/jobs/0", "verdict": "apply", "why": "fit"}])
@@ -524,7 +533,7 @@ def test_a_second_run_does_not_shrink_the_days_digest(ctx, fetcher):
     digest is the day's union now, so it cannot shrink."""
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
-         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}
         for i in range(10)]})
 
     first = scout.run(ctx, registry=REGISTRY[:1], limit=6, use_llm=False, commit=False)
@@ -574,7 +583,7 @@ def test_the_digest_leads_with_a_shortlist(ctx, fetcher):
     answer in one place small enough to read or retrieve whole."""
     fetcher.route("boards/quantco/jobs", {"jobs": [
         {"title": f"Quantitative Trading Intern {i}", "location": {"name": "New York, NY"},
-         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": "2026-08-19T10:00:00Z"}
+         "absolute_url": f"https://x.com/jobs/{i}", "updated_at": f"{_days_ago(3).isoformat()}T10:00:00Z"}
         for i in range(14)]})
     ctx.llm.default_response = json.dumps(
         [{"url": f"https://x.com/jobs/{i}", "verdict": "apply" if i < 12 else "skip",

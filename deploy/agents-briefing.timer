@@ -1,10 +1,13 @@
 [Unit]
-Description=Market open briefing at 08:00 on trading days
-# 08:00 America/New_York (the host's timezone), 90 minutes before the bell.
+Description=Morning tape and market open briefing at 06:30 on trading days
+# 06:30 America/New_York (the host's timezone), three hours before the bell and
+# before the European close has finished moving the tape. The brief is read on
+# a phone on the way out of the door, which is why it is here and not at 08:00:
+# the point is the daily habit, and 08:00 was late enough to be skipped.
 
 [Timer]
-OnCalendar=Mon-Fri 08:00
-# A machine that was asleep at 08:00 still gets its briefing on wake.
+OnCalendar=Mon-Fri 06:30
+# A machine that was asleep at 06:30 still gets its briefing on wake.
 Persistent=true
 AccuracySec=1min
 

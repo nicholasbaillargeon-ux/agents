@@ -46,6 +46,72 @@ NET_INCOME_TAGS = (
 )
 EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted")
 
+# --- the enterprise value bridge ----------------------------------------
+#
+# EV = market cap + total debt + preferred + minority interest - cash.
+# Every term after the first is an XBRL lookup, and every one of them has a
+# filer-specific tagging convention. The rule followed throughout: when two
+# tags could mean the same thing, never add them — pick one and record which,
+# because adding a subtotal to its own component is how a comps table reports
+# a company as twice as levered as it is.
+
+# Cash. Short-term investments are held separately: whether they net against
+# EV is a judgement call, so the caller is told both numbers and the choice.
+CASH_TAGS = (
+    "CashAndCashEquivalentsAtCarryingValue",
+    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    "CashAndDueFromBanks",
+)
+SHORT_TERM_INVESTMENT_TAGS = (
+    "ShortTermInvestments",
+    "MarketableSecuritiesCurrent",
+    "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
+    "OtherShortTermInvestments",
+)
+
+# Debt, as three mutually exclusive strategies in priority order. They are
+# alternatives, never addends: `LongTermDebt` in us-gaap is the *total* carrying
+# amount including current maturities, so adding it to `LongTermDebtCurrent`
+# double-counts the current portion — which for a filer with a big near-term
+# maturity wall is a material overstatement of leverage, in the direction that
+# makes a company look cheap on EV/EBITDA.
+DEBT_STRATEGIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("combined tag", ("DebtLongtermAndShorttermCombinedAmount",), ()),
+    ("LongTermDebt (incl. current) + short-term borrowings",
+     ("LongTermDebt",), ("ShortTermBorrowings", "CommercialPaper", "OtherShortTermBorrowings")),
+    ("noncurrent + current + short-term borrowings",
+     ("LongTermDebtNoncurrent", "LongTermDebtCurrent"),
+     ("ShortTermBorrowings", "CommercialPaper", "OtherShortTermBorrowings")),
+)
+
+MINORITY_TAGS = ("MinorityInterest",)
+PREFERRED_TAGS = ("PreferredStockValue", "PreferredStockLiquidationPreferenceValue")
+
+# EBITDA is not a GAAP line and is never tagged. It is built, and the build is
+# operating income plus D&A -- both of which *are* tagged, inconsistently.
+OPERATING_INCOME_TAGS = ("OperatingIncomeLoss",)
+
+# D&A, as mutually exclusive strategies for the same reason debt is. A filer
+# either reports one combined line or splits depreciation from amortisation;
+# Microsoft does the latter and tags no combined line at all, which is why a
+# flat tag list returned nothing and silently cost MSFT its EBITDA.
+DA_STRATEGIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("combined", ("DepreciationDepletionAndAmortization",)),
+    ("combined incl. accretion", ("DepreciationAmortizationAndAccretionNet",)),
+    ("combined", ("DepreciationAndAmortization",)),
+    ("combined ex. deferred commissions",
+     ("DepreciationDepletionAndAmortizationExcludingAmortizationOfDeferredSalesCommissions",)),
+    ("depreciation + intangible amortisation",
+     ("Depreciation", "AmortizationOfIntangibleAssets")),
+)
+
+# How stale a balance-sheet instant may be before it is refused. A filer that
+# reports only annually is thirteen months behind at worst, so this sits just
+# past that. Everything older is an abandoned tag, and EDGAR serves those
+# forever: Microsoft's combined-debt tag stops in 2015 and JP Morgan's
+# LongTermDebt in 2014, both still first in any fixed-priority list.
+STALE_INSTANT_DAYS = 450
+
 # A quarter, generously: 13 weeks is 91 days, but 4-4-5 calendars and 52/53-week
 # fiscal years stretch it either way.
 QUARTER_MIN_DAYS, QUARTER_MAX_DAYS = 60, 100
@@ -129,9 +195,20 @@ class Fundamentals:
     assets: float | None = None
     eps_diluted_ttm: float | None = None
     shares: float | None = None
+    shares_basis: str = ""          # which tag, or the derivation, produced it
     periods: list[str] = field(default_factory=list)
     revenue_tag: str = ""
     ttm_end: str = ""
+    # --- enterprise value bridge ---
+    cash: float | None = None
+    short_term_investments: float | None = None
+    total_debt: float | None = None
+    debt_basis: str = ""            # which DEBT_STRATEGIES branch produced it
+    da_basis: str = ""              # which DA_STRATEGIES branch produced it
+    minority_interest: float | None = None
+    preferred: float | None = None
+    operating_income_ttm: float | None = None
+    depreciation_amortization_ttm: float | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -145,6 +222,47 @@ class Fundamentals:
         if self.revenue_ttm and self.net_income_ttm is not None and self.revenue_ttm != 0:
             return self.net_income_ttm / self.revenue_ttm
         return None
+
+    @property
+    def ebitda_ttm(self) -> float | None:
+        """Operating income plus D&A. None if either leg is missing.
+
+        Not approximated from net income: adding back interest and tax from
+        whatever tags happen to exist produces a number that is EBITDA-shaped
+        and wrong, and a wrong EBITDA is worse than a blank cell because the
+        multiple built on it looks perfectly reasonable.
+        """
+        if self.operating_income_ttm is None or self.depreciation_amortization_ttm is None:
+            return None
+        return self.operating_income_ttm + self.depreciation_amortization_ttm
+
+    @property
+    def ebitda_margin(self) -> float | None:
+        e = self.ebitda_ttm
+        if e is None or not self.revenue_ttm:
+            return None
+        return e / self.revenue_ttm
+
+    @property
+    def net_cash(self) -> float | None:
+        """Cash (plus short-term investments) less total debt. Negative = net debt."""
+        if self.total_debt is None and self.cash is None:
+            return None
+        cash = (self.cash or 0.0) + (self.short_term_investments or 0.0)
+        return cash - (self.total_debt or 0.0)
+
+    def enterprise_value(self, market_cap: float | None) -> float | None:
+        """Market cap + debt + preferred + minorities - cash and equivalents.
+
+        Returns None without a market cap or without a debt figure: an EV that
+        silently treats unknown debt as zero is a market cap wearing a
+        different label, and it lands in the comps table looking authoritative.
+        """
+        if market_cap is None or self.total_debt is None:
+            return None
+        cash = (self.cash or 0.0) + (self.short_term_investments or 0.0)
+        return (market_cap + self.total_debt + (self.preferred or 0.0)
+                + (self.minority_interest or 0.0) - cash)
 
 
 @dataclass
@@ -331,6 +449,30 @@ class Edgar:
         return value
 
     @staticmethod
+    def _instant_class_values(points: list[dict]) -> list[float]:
+        """Every distinct value reported at the newest instant.
+
+        For a cover-page share count this is one entry per share class, which
+        is what makes it possible to test whether a derived consolidated count
+        is in the same units as the classes or in the units of one of them.
+        """
+        instants = [p for p in points if "start" not in p and p.get("end")]
+        if not instants:
+            return []
+        newest = max(p["end"] for p in instants)
+        out: list[float] = []
+        for p in instants:
+            if p["end"] != newest:
+                continue
+            try:
+                v = float(p["val"])
+            except (TypeError, ValueError):
+                continue
+            if v not in out:
+                out.append(v)
+        return out
+
+    @staticmethod
     def _latest_instant_values(points: list[dict]) -> tuple[float | None, int, str]:
         """(value at the newest instant, how many distinct values share it, that date).
 
@@ -355,6 +497,121 @@ class Edgar:
         if not values:
             return None, 0, ""
         return values[0], len(set(values)), newest
+
+    def _instant_from(self, facts: dict, tags: tuple[str, ...], *, ns: str = "us-gaap",
+                      today: date | None = None) -> tuple[float | None, str, str]:
+        """(value, tag used, as-of date) for the *most recent* usable instant.
+
+        Ranked by date, not by list order, for exactly the reason revenue is:
+        filers migrate between these tags and EDGAR keeps serving the abandoned
+        one forever. Taking the first tag that returns anything gave Microsoft
+        a 2015 debt balance and JP Morgan a 2018 cash balance, both of which
+        look entirely plausible in a comps table and are off by a decade.
+
+        Anything older than STALE_INSTANT_DAYS is refused outright rather than
+        returned as a best effort — a balance-sheet item that old cannot
+        describe the enterprise value of a company trading today.
+        """
+        today = today or datetime.now(timezone.utc).date()
+        best: tuple[str, float, str] | None = None   # (as_of, value, tag)
+        for tag in tags:
+            value, classes, as_of = self._latest_instant_values(self._points(facts, tag, ns=ns))
+            if value is None or not as_of:
+                continue
+            if classes > 1:
+                # Two values at the same instant means the line is dimensioned
+                # (by class, by segment). Summing them is as likely to be wrong
+                # as right, so it is skipped and the next tag gets a turn.
+                continue
+            if (today - date.fromisoformat(as_of)).days > STALE_INSTANT_DAYS:
+                continue
+            if best is None or as_of > best[0]:
+                best = (as_of, value, tag)
+        if best is None:
+            return None, "", ""
+        return best[1], best[2], best[0]
+
+    def _total_debt(self, facts: dict, *, today: date | None = None
+                    ) -> tuple[float | None, str, str]:
+        """(total debt, how it was built, as-of). Strategies are alternatives.
+
+        Two rules, both learned from a wrong number:
+
+        * The primaries of different strategies are never summed. `LongTermDebt`
+          in us-gaap already includes current maturities, so adding it to
+          `LongTermDebtCurrent` double-counts the maturity wall — in the
+          direction that makes a levered company look cheap on EV/EBITDA.
+        * The winning strategy is the one whose components are *current*, not
+          the one listed first. Microsoft still serves a combined-debt tag last
+          filed in 2015; taking it produced $31.8B against a true $40.3B.
+
+        Within a strategy, a component staler than the primary is dropped
+        rather than added: Microsoft's `ShortTermBorrowings` is a zero from
+        2018, and adding a stale zero is silently asserting the line is empty.
+        """
+        today = today or datetime.now(timezone.utc).date()
+        candidates: list[tuple[str, float, str, str]] = []   # (as_of, total, label, used)
+        for label, primaries, extras in DEBT_STRATEGIES:
+            total, used, as_of = 0.0, [], ""
+            for tag in primaries:
+                value, _, when = self._instant_from(facts, (tag,), today=today)
+                if value is None:
+                    continue
+                total += value
+                used.append(tag)
+                as_of = max(as_of, when)
+            if not used:
+                continue
+            for tag in extras:
+                value, _, when = self._instant_from(facts, (tag,), today=today)
+                # A component from an older balance sheet than the primary is
+                # not part of the same balance sheet. Dropping it is the
+                # conservative error; adding it asserts a number nobody filed.
+                if value is None or when < as_of:
+                    continue
+                total += value
+                used.append(tag)
+                as_of = max(as_of, when)
+            candidates.append((as_of, total, label, " + ".join(used)))
+        if not candidates:
+            return None, "", ""
+        as_of, total, label, used = max(candidates, key=lambda c: c[0])
+        return total, f"{label} [{used}] as of {as_of}", as_of
+
+    def _ttm_group(self, facts: dict, strategies) -> tuple[float | None, str]:
+        """Sum a strategy's tags into one TTM, preferring the freshest strategy.
+
+        Same shape as `_best_series` and for the same reason, but over groups:
+        the answer may be one tag or the sum of two, and which it is depends on
+        the filer rather than on anything knowable in advance.
+        """
+        best: tuple[str, float, str] | None = None   # (ttm_end, value, label)
+        for label, tags in strategies:
+            total, end, used = 0.0, "", []
+            for tag in tags:
+                points = self._points(facts, tag)
+                if not points:
+                    continue
+                value, periods = self._ttm(points)
+                if value is None or not periods:
+                    continue
+                total += value
+                used.append(tag)
+                end = max(end, periods[0].split("..")[1])
+            if not used:
+                continue
+            if len(used) < len(tags):
+                # A split strategy that found only one of its legs is not the
+                # strategy it is named after. Alphabet tags `Depreciation` and
+                # no intangible amortisation line, so the figure is depreciation
+                # alone — true, and materially different from D&A for a filer
+                # that amortises acquired intangibles.
+                label = f"{used[0]} only (no {', '.join(t for t in tags if t not in used)})"
+            if best is None or end > best[0]:
+                best = (end, total, f"{label} [{' + '.join(used)}]")
+        if best is None:
+            return None, ""
+        return best[1], best[2]
 
     def fundamentals(self, cik: int, *, today: date | None = None) -> Fundamentals:
         f = Fundamentals()
@@ -390,11 +647,15 @@ class Edgar:
         if eps_points:
             f.eps_diluted_ttm, _ = self._ttm(eps_points)
 
-        f.equity = self._latest_instant(self._points(facts, "StockholdersEquity"))
-        f.assets = self._latest_instant(self._points(facts, "Assets"))
+        f.equity, _, _ = self._instant_from(
+            facts, ("StockholdersEquity",
+                    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
+            today=today)
+        f.assets, _, _ = self._instant_from(facts, ("Assets",), today=today)
         # dei carries the cover-page share count, which is present for filers
         # that never tag CommonStockSharesOutstanding in us-gaap.
         stale_share_counts: list[str] = []
+        multi_class: list[str] = []
         for tag, ns in (("EntityCommonStockSharesOutstanding", "dei"),
                         ("CommonStockSharesOutstanding", "us-gaap"),
                         ("WeightedAverageNumberOfDilutedSharesOutstanding", "us-gaap")):
@@ -402,24 +663,116 @@ class Edgar:
             if shares is None:
                 continue
             if classes > 1:
-                # One number cannot describe two classes trading at different
-                # prices, so say so instead of picking one.
-                f.notes.append(
-                    f"{classes} share classes reported on {as_of} under {tag}; share "
-                    "count, market cap and P/S are omitted rather than guessed")
-                break
+                # One number cannot describe two classes, so this tag is no
+                # use — but the next one may be consolidated, so keep going
+                # rather than abandoning the search. Stopping here is what cost
+                # Meta its market cap: its cover page is filed per class and
+                # its diluted weighted-average count, one line below, is not.
+                multi_class.append(f"{classes} share classes reported on {as_of} under {tag}")
+                continue
             if (today - date.fromisoformat(as_of)).days > STALE_SHARES_DAYS:
                 # Berkshire's cover-page count stops in 2011 — every later one
                 # is dimensioned per class and absent from companyfacts. A
                 # fifteen-year-old share count silently ruins a market cap.
                 stale_share_counts.append(f"{tag} last reported {as_of}")
                 continue
-            f.shares = shares
+            f.shares, f.shares_basis = shares, f"{tag} ({as_of})"
             break
+
+        if f.shares is None and f.net_income_ttm and f.eps_diluted_ttm:
+            # Last resort, and pure arithmetic on two filed facts: diluted EPS
+            # is net income over diluted shares, so the quotient is the share
+            # count the filer itself used. It is consolidated across classes by
+            # construction, which is exactly what the per-class cover page is
+            # not.
+            #
+            # The caveat is real and is recorded: this count is in the economic
+            # units of the class the EPS is reported in. For a filer whose
+            # classes are economically identical (Meta, Alphabet) that is the
+            # whole company. For one where they are not — Berkshire's B is
+            # 1/1500 of an A — multiplying it by the *wrong* class's price is
+            # off by that ratio, so the basis is printed wherever the number is.
+            derived = f.net_income_ttm / f.eps_diluted_ttm
+            # Is the derived count in the same units as the classes on the
+            # cover page, or in the units of one of them? Test it rather than
+            # assume it. Where the classes are economically equal (Meta,
+            # Alphabet) the derived count lands close to their sum. Where they
+            # are not — Berkshire's B is 1/1500 of an A — diluted EPS is stated
+            # per A-equivalent and the derived count comes out three orders of
+            # magnitude below the sum. Multiplying that by the B-class price is
+            # the wrong answer by exactly the conversion ratio, and nothing
+            # downstream would notice, so the ratio is what gates the fallback.
+            class_counts = self._instant_class_values(
+                self._points(facts, "EntityCommonStockSharesOutstanding", ns="dei")) or \
+                self._instant_class_values(
+                    self._points(facts, "CommonStockSharesOutstanding"))
+            total_classes = sum(class_counts) if class_counts else 0.0
+            ratio = derived / total_classes if total_classes else None
+            if derived <= 0:
+                pass
+            elif ratio is not None and not (0.5 <= ratio <= 2.0):
+                f.notes.append(
+                    f"diluted EPS implies {derived:,.0f} shares against {total_classes:,.0f} "
+                    "on the cover page across all classes — the classes are not "
+                    "economically equal, so no single share count describes this "
+                    "filer and market cap, EV and P/S are omitted")
+            else:
+                f.shares, f.shares_basis = derived, "derived: net income ÷ diluted EPS"
+                f.notes.append(
+                    "share count derived from net income ÷ diluted EPS because the "
+                    "cover page is filed per class"
+                    + (f" ({multi_class[0]})" if multi_class else "")
+                    + (f"; cross-checked against the {total_classes:,.0f} shares on the "
+                       f"cover page (ratio {ratio:.2f})" if ratio else ""))
+        if f.shares is None and multi_class:
+            f.notes.append(
+                "; ".join(multi_class) + "; no consolidated count and no diluted "
+                "EPS to derive one from, so share count, market cap and P/S are "
+                "omitted rather than guessed")
         if f.shares is None and stale_share_counts:
             f.notes.append("no current share count in EDGAR (" +
                            "; ".join(stale_share_counts) +
                            "); market cap and P/S are omitted")
+
+        # --- enterprise value bridge ---
+        f.cash, cash_tag, cash_as_of = self._instant_from(facts, CASH_TAGS, today=today)
+        f.short_term_investments, _, _ = self._instant_from(
+            facts, SHORT_TERM_INVESTMENT_TAGS, today=today)
+        f.total_debt, f.debt_basis, debt_as_of = self._total_debt(facts, today=today)
+        f.minority_interest, _, _ = self._instant_from(facts, MINORITY_TAGS, today=today)
+        f.preferred, _, _ = self._instant_from(facts, PREFERRED_TAGS, today=today)
+
+        if f.total_debt is None:
+            f.notes.append(
+                "no us-gaap debt tag matched, so enterprise value is omitted — "
+                "financials and REITs frequently tag borrowings only in a "
+                "company-specific namespace")
+        if f.cash is None:
+            f.notes.append("no cash tag matched; the EV bridge nets no cash")
+
+        # A balance sheet from a materially older filing than the income
+        # statement makes the bridge mix two dates. Small gaps are normal (the
+        # cover-page and the statements are filed together); a large one is not.
+        for label, when in (("cash", cash_as_of), ("debt", debt_as_of)):
+            if not when or not f.ttm_end:
+                continue
+            gap = (date.fromisoformat(f.ttm_end) - date.fromisoformat(when)).days
+            if gap > 200:
+                f.notes.append(
+                    f"{label} is as of {when}, {gap} days before the {f.ttm_end} "
+                    "income statement — the EV bridge spans two filings")
+
+        _, oi_points = self._best_series(facts, OPERATING_INCOME_TAGS)
+        if oi_points:
+            f.operating_income_ttm, _ = self._ttm(oi_points)
+        f.depreciation_amortization_ttm, f.da_basis = self._ttm_group(facts, DA_STRATEGIES)
+        if f.operating_income_ttm is None:
+            f.notes.append(
+                "no OperatingIncomeLoss TTM: EBITDA and EV/EBITDA are omitted "
+                "(banks and insurers do not report an operating income line)")
+        elif f.depreciation_amortization_ttm is None:
+            f.notes.append("no D&A TTM in EDGAR; EBITDA is omitted rather than "
+                           "approximated by operating income")
 
         if f.ttm_end:
             age = (today - date.fromisoformat(f.ttm_end)).days

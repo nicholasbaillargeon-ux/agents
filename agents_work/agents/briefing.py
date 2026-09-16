@@ -16,6 +16,7 @@ from ..llm import LLMUnavailable
 from ..sources.news import News
 from ..sources.prices import FUTURES, MACRO, YIELDS, PriceSource
 from ..store import Run, record
+from . import tape
 from .base import AgentResult, Context, finalize
 
 log = logging.getLogger(__name__)
@@ -129,8 +130,16 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     if er_note:
         brief.degrade(er_note)
 
+    # The tape is fetched before the lede is written so the model sees the
+    # curve and the strip alongside the futures, and cannot describe a risk-off
+    # morning without noticing that the long end sold off with it.
+    tape_data = tape.collect(ctx, today=today)
+    for note in tape_data.notes:
+        brief.degrade(note)
+
     data = {"futures": futures, "macro": macro, "movers": movers,
-            "headlines": headlines, "earnings": er_rows, "watchlist": watchlist}
+            "headlines": headlines, "earnings": er_rows, "watchlist": watchlist,
+            "tape": tape_data}
 
     # Lede first — it is the part read on a phone, and the only part of this
     # brief a model wrote, so it is the only part that can be wrong about a
@@ -140,6 +149,14 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
         # The section the reader actually opens on a phone. Losing it silently
         # is the whole reason this flag exists.
         brief.degrade("overnight lede omitted")
+    tape_lede, talking_point, tape_unverified = tape.narrate(
+        ctx, tape_data, tape_context=_tape_context(data))
+    tape_data.tape_lede, tape_data.talking_point = tape_lede, talking_point
+    if ctx.llm.available and not talking_point:
+        # The one section written to be repeated out loud in an interview. If
+        # it is missing, the reader should know it was meant to be there.
+        brief.degrade("talking point of the day omitted")
+
     if lede:
         if unverified:
             lede += ("\n\n_Not found in this morning's tape or headlines: "
@@ -148,8 +165,19 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
             brief.extra_meta["ungrounded_figures"] = len(unverified)
         brief.add("Overnight", lede)
 
+    if tape_lede:
+        brief.add("The tape", tape_lede)
+    if talking_point:
+        brief.add("Talking point of the day", f"> {talking_point}")
+    if tape_unverified:
+        brief.degrade(
+            "tape prose cites figures not in its own inputs: "
+            + ", ".join(f"`{x}`" for x in tape_unverified[:6]))
+        brief.extra_meta["tape_ungrounded_figures"] = len(tape_unverified)
+
     brief.add("Futures", table(["Contract", "Last", "Change", "Note"], _quote_rows(futures)))
     brief.add("Macro", table(["Instrument", "Last", "Change", "Note"], _quote_rows(macro)))
+    tape.add_sections(ctx, brief, tape_data)
 
     if movers:
         rows = [[q.symbol, f"{q.last:,.2f}" if q.last is not None else "n/a",
@@ -176,6 +204,39 @@ def build_brief(ctx: Context, *, watchlist: list[str] | None = None,
     brief.source("Yahoo Finance via yfinance", note="futures, macro and watchlist quotes")
     brief.extra_meta["watchlist"] = ",".join(watchlist)
     return brief, data
+
+
+def _host() -> str:
+    """The LAN address the dashboard answers on, for the push's tap target.
+
+    A notification whose click action is localhost is useless on a phone, and
+    the hostname this process sees is not the one the phone can route to.
+    """
+    import socket  # noqa: PLC0415 - only needed when a push is actually sent
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.168.1.1", 1))   # no packet is sent; this just picks a route
+        addr = s.getsockname()[0]
+        s.close()
+        return addr
+    except OSError:
+        return "localhost"
+
+
+def _tape_context(data: dict) -> str:
+    """The equity tape, as one line, for the macro narration's prompt.
+
+    The tape sections know about rates and deals and nothing about stocks. A
+    talking point that says the curve steepened is worth more if it can also
+    say equities were bid while it happened, so the futures go in too.
+    """
+    bits = []
+    for q in data["futures"] + data["macro"]:
+        if q.last is not None and q.prev_close is not None:
+            bits.append(f"{q.label}: {q.last:,.2f} ({change_label(q).split(' ', 1)[-1]})")
+    return ("Equity and commodity tape this morning:\n  " + "\n  ".join(bits)
+            if bits else "")
 
 
 def _lede(ctx: Context, data: dict) -> tuple[str, list[str]]:
@@ -232,10 +293,30 @@ def run(ctx: Context, *, watchlist: list[str] | None = None, commit: bool = True
         except Exception as e:  # noqa: BLE001
             res.degrade(f"could not commit briefing: {e}")
 
+    # The push goes out after the brief is written and committed, never before:
+    # a phone buzzing about a brief that then failed to persist is worse than a
+    # late buzz, because the notification is the only copy the reader saw.
+    tape_data = data["tape"]
+    es = next((q for q in data["futures"] if q.symbol == "ES=F" and q.ok), None)
+    equity_line = (f"**S&P fut** {es.last:,.0f} {change_label(es)}" if es else "")
+    pushed = ctx.push.send(
+        tape.push_body(tape_data, equity_line),
+        title=f"Morning tape - {brief.date}",
+        click=f"http://{_host()}:{ctx.cfg.port}/",
+        tags="chart_with_upwards_trend", priority=4)
+    if not pushed.sent and ctx.push.available:
+        # Not configured is already reported by cfg.degradations(); configured
+        # and failing is a new fact and belongs on this run.
+        res.degrade(pushed.degradation)
+        brief.degrade(pushed.degradation)
+    res.data["pushed"] = pushed.sent
+
     live = [q for q in data["futures"] if q.ok]
     res.summary = (f"{len(live)}/{len(data['futures'])} futures priced, "
                    f"{len(data['headlines'])} headlines, "
-                   f"{len(data['earnings'])} reporting today")
+                   f"{len(tape_data.deals)} deals, "
+                   f"{len(data['earnings'])} reporting today"
+                   + (", pushed" if pushed.sent else ""))
     record(ctx.db, Run(agent=NAME, target=res.target, ok=True, artifact=str(res.artifact),
                        summary=res.summary, degradations=res.degradations,
                        started_at=started.timestamp(),

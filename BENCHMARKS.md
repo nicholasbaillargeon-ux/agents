@@ -60,6 +60,22 @@ Each gate names the failure it exists to prevent. Several of them were written
 | M4 | Movers are ranked by absolute move | −4% outranks +1% |
 | M5 | Instruments are quoted in their own units **(regression)** | a 4.66→4.70 move on the 10y renders `+4bp`, never `+0.86%` — a model read the percent form as 92 basis points |
 | M6 | The lede is checked against its own inputs | figures the lede uses that appear in neither the tape nor the headline titles are named under it; ones drawn from a headline are not, or the warning becomes noise |
+| M7 | Curve spreads are basis points | a 4.67→5.00 gap renders `+33bp`, never the 7% a percentage change would give |
+| M8 | The feed's display duplicate is not a second tenor | `BC_30YEARDISPLAY` repeats `BC_30YEAR`; the curve holds one 30Y |
+| M9 | FOMC dates are scraped, and a trailing note keeps its own year **(regression)** | the page closes each year's table with a meeting in the year *after* next; read under the enclosing heading it became a phantom meeting twelve months early |
+| M10 | A meeting inside the front contract's month is declared a blend | ZQ settles to a monthly average, so the spot anchor straddles the move and understates everything measured against it |
+| M11 | The push leads with levels and carries the talking point | levels, then the model's read, then the point — the order they stop being worth reading on a lock screen |
+| M12 | An unconfigured or failed push is reported, never silent | a phone that did not buzz is a degradation on the run, not an absence of one |
+
+## 3b · Enterprise value bridge
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| V1 | The most recent instant wins, not the first tag listed **(regression)** | MSFT's combined-debt tag stops in 2015 and JPM's cash tag in 2018; first-match-wins gave MSFT $31.8B against a true $40.3B |
+| V2 | A subtotal is never added to its own component | `LongTermDebt` already includes current maturities; adding `LongTermDebtCurrent` double-counts the maturity wall |
+| V3 | A stale component is dropped, not added as a zero **(regression)** | Apple's `ShortTermBorrowings` is a zero last filed in 2018; adding it asserts a line nobody filed |
+| V4 | A split-D&A filer still gets EBITDA **(regression)** | Microsoft tags `Depreciation` and `AmortizationOfIntangibleAssets` separately and no combined line, which silently cost it its EBITDA |
+| V5 | Share classes that are not economically equal refuse one count | Berkshire's B is 1/1500 of an A; the derived count times the wrong class's price is off by that ratio |
 
 ## 4 · Internship scout
 
@@ -100,6 +116,29 @@ Each gate names the failure it exists to prevent. Several of them were written
 | A7 | Search-only degradation | with no LLM, passages are still returned and labelled search-only |
 | A8 | Retrieval balances breadth and depth **(regression)** | a cross-document question gets one passage from each of `k - k/4` documents before any gets a second; the remaining slots then follow score with no per-document cap, so a question about a document that *is* a long list can retrieve several slices of it. `_spread` never returns more than k |
 | A9 | Hyphenated compounds match their parts **(regression)** | "moving-average crossover" shared no token with a brief describing a "20-day moving average", so the retriever returned that backtest's cost table instead of its strategy |
+
+## 6 · EDGAR comps engine
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| C1 | EBITDA is never approximated from a missing leg | no operating income or no D&A means a blank cell, not a number built from net income |
+| C2 | Unknown debt yields no enterprise value **(regression)** | an EV that treats unknown debt as zero is a market cap wearing a different label |
+| C3 | Medians are taken over the peers that have the metric **(regression)** | a blank is not a zero; averaging blanks in drags the median toward a multiple no peer trades at |
+| C4 | A negative denominator blanks the multiple | a loss-making company is not trading at −8x EBITDA |
+| C5 | A model-resolved peer set is checked against the SEC ticker file | a plausible ticker belonging to something else is harder to spot in a finished table than a missing one |
+
+## 7 · Deal book
+
+| # | Gate | Threshold |
+|---|------|-----------|
+| D1 | The other meanings of "acquisition" are refused | defence procurement, land banks, customer acquisition and job titles outnumber real M&A in an unfiltered feed |
+| D2 | Newswire site furniture is stripped before any filter **(regression)** | PR Newswire renders its whole industry taxonomy into every page, so a keyword filter matched every sector on every release |
+| D3 | A business-scale figure is not a purchase price **(regression)** | "$1 billion in annualized marketplace sales" was recorded as the price of four brands |
+| D4 | A foreign-currency deal is labelled, not counted as dollars | A$2.8B is not $2.8B, and the size floor is not applied to it |
+| D5 | Enrichment is spent only on fetchable links **(regression)** | ranked on parties-and-price alone, all 22 slots went to aggregator links whose bodies cannot be fetched, and 0 to the wires |
+| D6 | Bank names survive the full stops inside them **(regression)** | "Goldman Sachs & Co. LLC" returned "LLC" under a sentence pattern bounded by `[^.]` |
+| D7 | Your annotation survives every later sweep | the agent refreshes what it knows; `my_view`, `status` and `reviewed_at` are never written by a sweep |
+| D8 | A watched advisor or sector overrides the size floor | the floor keeps tuck-ins out; the firm you are interviewing with is worth a page at any size |
 
 ## 6 · Performance
 

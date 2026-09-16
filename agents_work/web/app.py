@@ -29,8 +29,15 @@ AGENTS = {
                  "fundamentals and headlines, committed to the notes repo."),
     "backtest": ("Backtest runner", "A strategy in plain English, generated, run in a "
                  "sandbox, scored on Sharpe and drawdown."),
-    "briefing": ("Market open briefing", "Futures, macro, watchlist movers and today's "
-                 "earnings, before the bell."),
+    "briefing": ("Morning tape", "The Treasury curve, what fed funds futures price for "
+                 "the next three FOMC meetings, overnight M&A, futures and movers — "
+                 "and one talking point, pushed to your phone at 06:30."),
+    "comps": ("EDGAR comps engine", "A peer set in, a comparable-companies table out: "
+              "market cap, an enterprise value bridged through debt and cash, and the "
+              "multiples that follow — every cell traced to a filed XBRL fact."),
+    "dealbook": ("Deal book", "M&A feeds watched for your filters; a structured "
+                 "one-pager drafted into Postgres for each match. The view is yours "
+                 "to add."),
     "scout": ("Internship scout", "Quant, bank, broker, exchange, fintech, AI and "
               "enterprise-IT boards swept nightly; only what is new since last run, "
               "with how long each posting has been open."),
@@ -194,6 +201,8 @@ def create_app(cfg=None) -> FastAPI:
                 "llm": cfg.has_llm, "price_lake": cfg.has_lake,
                 "sandbox_image": docker_available(),
                 "notes_remote": bool(cfg.git_remote),
+                "phone_push": cfg.has_push,
+                "deal_book": cfg.has_dealbook,
                 "vault_roots": [str(p) for p in cfg.vault_roots if p.is_dir()],
             },
             "degradations": cfg.degradations(),
@@ -205,6 +214,49 @@ def create_app(cfg=None) -> FastAPI:
             "runs_recorded": len(runs),
         }
         return JSONResponse(payload)
+
+    @app.get("/deals", response_class=HTMLResponse)
+    def deals_page() -> str:
+        from ..dealstore import DealBookUnavailable, connect as pg, ensure_schema, list_deals
+
+        try:
+            with pg(cfg.dealbook_dsn) as conn:
+                ensure_schema(conn)
+                rows = list_deals(conn, limit=200)
+        except DealBookUnavailable as e:
+            return _page("Deal book", f'<h1>Deal book</h1><p class="muted">'
+                                      f'Not available: {html.escape(str(e))}</p>')
+        if not rows:
+            return _page("Deal book", '<h1>Deal book</h1><p class="muted">'
+                                      'Empty — run <code>agents deals</code>.</p>')
+        cards = []
+        for r in rows:
+            value = ("undisclosed" if r["value_usd"] is None
+                     else f"{r['currency'] or '$'}{float(r['value_usd']) / 1e9:,.2f}B")
+            flag = (f'<span class="pill fail">{html.escape(r["flagged_advisor"])} advising</span>'
+                    if r["flagged_advisor"] else "")
+            view = (f'<p><strong>Your view:</strong> {html.escape(r["my_view"])}</p>'
+                    if r["my_view"] else
+                    '<p class="muted">No view recorded yet — '
+                    f'<code>agents deals --note {r["id"]} "..."</code></p>')
+            questions = "".join(f"<li>{html.escape(q)}</li>"
+                                for q in (r["open_questions"] or []))
+            cards.append(
+                f'<article class="card"><h3>#{r["id"]} '
+                f'{html.escape(r["acquirer"] or "?")} → {html.escape(r["target"] or "?")}</h3>'
+                f'<p class="muted">{html.escape(value)} · '
+                f'{html.escape(r["consideration"] or "structure undisclosed")} · '
+                f'{html.escape(r["sector"] or "sector unclassified")} · '
+                f'{html.escape(r["status"])} {flag}</p>'
+                + (f'<p>{html.escape(r["rationale"])}</p>' if r["rationale"] else "")
+                + (f'<p><strong>Multiple:</strong> {html.escape(r["implied_multiple"])}</p>'
+                   if r["implied_multiple"] else "")
+                + (f"<ul>{questions}</ul>" if questions else "")
+                + view
+                + f'<p><a href="{html.escape(r["url"])}">source release</a></p></article>')
+        return _page("Deal book",
+                     f"<h1>Deal book</h1><p class=\"muted\">{len(rows)} deals. "
+                     "The agent drafts; the view is yours.</p>" + "".join(cards))
 
     @app.get("/api/runs")
     def api_runs(agent: str | None = None, limit: int = 50) -> JSONResponse:
@@ -239,6 +291,8 @@ def _health_pills(cfg) -> str:
         ("notes repo", cfg.notes_repo.is_dir(), cfg.git_remote or "local only"),
         ("vault", any(p.is_dir() for p in cfg.vault_roots),
          f"{len(cfg.vault_roots)} root(s)"),
+        ("phone push", cfg.has_push, f"ntfy at {cfg.ntfy_server}"),
+        ("deal book", cfg.has_dealbook, "Postgres"),
     ]
     return "".join(
         f'<span class="pill {"ok" if good else "fail"}" title="{html.escape(str(note))}">'
@@ -253,7 +307,8 @@ def _page(title: str, body: str) -> str:
 <link rel="stylesheet" href="/static/style.css">
 </head><body>
 <nav><a class="brand" href="/">agents_work</a>
-<span class="sub">five agents, one run log</span></nav>
+<span class="sub">seven agents, one run log</span>
+<a href="/deals" class="sub">deal book</a></nav>
 <main>{body}</main>
 <footer class="page">Read-only view. Runs are owned by systemd timers and the
 <code>agents</code> CLI.</footer>

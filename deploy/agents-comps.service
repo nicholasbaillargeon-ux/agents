@@ -1,0 +1,18 @@
+[Unit]
+Description=agents_work weekly comps table
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nbaillar
+Group=nbaillar
+WorkingDirectory=/home/nbaillar/agents_work
+# The set is an override, not a constant: change it with
+#   sudo systemctl edit agents-comps.service
+# and set Environment=AGENTS_COMPS_SET=semis
+Environment=AGENTS_COMPS_SET=advisory
+ExecStart=/bin/sh -c '/home/nbaillar/agents_work/.venv/bin/agents comps --set "$AGENTS_COMPS_SET"'
+SuccessExitStatus=0 1
+TimeoutStartSec=900
+NoNewPrivileges=yes

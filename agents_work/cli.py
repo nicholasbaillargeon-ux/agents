@@ -8,7 +8,7 @@ import logging
 import sys
 from datetime import datetime
 
-from .agents import analyst, backtest, briefing, research, scout
+from .agents import analyst, backtest, briefing, comps, dealbook, research, scout
 from .agents.base import Context
 from .config import load_config
 from .netcache import prune_cache
@@ -71,6 +71,28 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--limit", type=int, default=None,
                    help="how many new postings to show (default 100); raise it to "
                         "drain a backlog in one run")
+
+    c = sub.add_parser("comps", help="comparable-companies table from SEC filings")
+    c.add_argument("tickers", nargs="*", help="explicit peer tickers")
+    c.add_argument("--set", dest="peer_set", default=None,
+                   help=f"a curated set: {', '.join(comps.PEER_SETS)}")
+    c.add_argument("--peers", default=None,
+                   help='describe the peer group in English, e.g. "mid-cap asset managers"')
+    c.add_argument("--list-sets", action="store_true", help="print the curated sets and exit")
+
+    d = sub.add_parser("deals", help="M&A deal book: sweep, review, annotate")
+    d.add_argument("--list", dest="list_deals", action="store_true",
+                   help="show the book instead of sweeping")
+    d.add_argument("--show", type=int, default=None, metavar="ID",
+                   help="print one deal's full one-pager")
+    d.add_argument("--note", nargs=2, default=None, metavar=("ID", "TEXT"),
+                   help="record your own view and mark the deal reviewed")
+    d.add_argument("--status", nargs=2, default=None, metavar=("ID", "STATUS"),
+                   help="set a deal's status (new/reviewed/tracking/archived)")
+    d.add_argument("--flagged", action="store_true", help="with --list, only advisor-flagged")
+    d.add_argument("--new-only", action="store_true", help="with --list, only unreviewed")
+    d.add_argument("--max-enrich", type=int, default=dealbook.MAX_ENRICH)
+    d.add_argument("--max-drafts", type=int, default=dealbook.MAX_DRAFTS)
 
     a = sub.add_parser("ask", help="ask the RAG analyst")
     a.add_argument("question")
@@ -138,6 +160,36 @@ def main(argv: list[str] | None = None) -> int:
             return _print_result(scout.run(
                 ctx, min_score=args.min_score, internships_only=not args.all_roles,
                 use_llm=not args.no_llm, commit=commit, **kw), as_json=args.json)
+        if args.cmd == "comps":
+            if args.list_sets:
+                for name, members in comps.PEER_SETS.items():
+                    print(f"{name:<16} {', '.join(members)}")
+                print("\nSectors this table cannot price, and why:")
+                for sector, why in comps.KNOWN_HARD.items():
+                    print(f"  {sector:<20} {why}")
+                return 0
+            label, note = "", ""
+            if args.peer_set:
+                if args.peer_set not in comps.PEER_SETS:
+                    print(f"unknown set {args.peer_set!r}; try --list-sets", file=sys.stderr)
+                    return 2
+                tickers, label, note = (list(comps.PEER_SETS[args.peer_set]),
+                                        args.peer_set, f"curated set `{args.peer_set}`")
+            elif args.peers:
+                tickers, note = comps.resolve_peers(ctx, args.peers)
+                label = args.peers
+                if not tickers:
+                    print(f"could not resolve a peer set: {note}", file=sys.stderr)
+                    return 1
+            else:
+                tickers = [t.upper() for t in args.tickers]
+                if not tickers:
+                    print("give tickers, --set, or --peers", file=sys.stderr)
+                    return 2
+            return _print_result(comps.run(ctx, tickers, label=label, peer_note=note,
+                                           commit=commit), as_json=args.json)
+        if args.cmd == "deals":
+            return _deals(ctx, args, commit=commit)
         if args.cmd == "ask":
             res = analyst.run(ctx, args.question, k=args.k, since=args.since,
                               reindex=args.reindex)
@@ -162,6 +214,87 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _deals(ctx, args, *, commit: bool) -> int:
+    """The review half of the deal book. The sweep is the agent; this is you."""
+    from .dealstore import (DealBookUnavailable, annotate, connect, ensure_schema,
+                            get_deal, list_deals, set_status)
+
+    interactive = (args.list_deals or args.show is not None
+                   or args.note is not None or args.status is not None)
+    if not interactive:
+        return _print_result(
+            dealbook.run(ctx, commit=commit, max_enrich=args.max_enrich,
+                         max_drafts=args.max_drafts), as_json=args.json)
+    try:
+        with connect(ctx.cfg.dealbook_dsn) as conn:
+            ensure_schema(conn)
+            if args.note:
+                deal_id, text = int(args.note[0]), args.note[1]
+                ok = annotate(conn, deal_id, text)
+                print(f"deal {deal_id}: {'annotated and marked reviewed' if ok else 'not found'}")
+                return 0 if ok else 1
+            if args.status:
+                deal_id, status = int(args.status[0]), args.status[1]
+                ok = set_status(conn, deal_id, status)
+                print(f"deal {deal_id}: {'status ' + status if ok else 'not found'}")
+                return 0 if ok else 1
+            if args.show is not None:
+                row = get_deal(conn, args.show)
+                if not row:
+                    print(f"no deal {args.show}", file=sys.stderr)
+                    return 1
+                print(json.dumps(row, indent=2, default=str) if args.json
+                      else _render_deal(row))
+                return 0
+            rows = list_deals(conn, status="new" if args.new_only else None,
+                              flagged_only=args.flagged)
+            if args.json:
+                print(json.dumps(rows, indent=2, default=str))
+                return 0
+            if not rows:
+                print("the book is empty — run `agents deals` to sweep")
+                return 0
+            for r in rows:
+                flag = "!" if r["flagged_advisor"] else " "
+                view = "*" if r["my_view"] else " "
+                value = ("—" if r["value_usd"] is None
+                         else f"{float(r['value_usd']) / 1e9:,.2f}B")
+                print(f"{r['id']:>4}{flag}{view} {r['status']:<9} {value:>9} "
+                      f"{(r['acquirer'] or '?')[:24]:<24} -> {(r['target'] or '?')[:24]:<24} "
+                      f"{r['sector'][:18]}")
+            print(f"\n{len(rows)} deals   ! = watched advisor   * = you have a view on it")
+            return 0
+    except DealBookUnavailable as e:
+        print(f"deal book unavailable: {e}", file=sys.stderr)
+        return 1
+
+
+def _render_deal(r: dict) -> str:
+    out = [f"#{r['id']}  {r['acquirer'] or '?'} -> {r['target'] or '?'}",
+           f"  status     {r['status']}" + ("  (you have a view on this)" if r["my_view"] else ""),
+           f"  sector     {r['sector'] or '—'}",
+           f"  value      {'—' if r['value_usd'] is None else format(float(r['value_usd']), ',.0f')}"
+           f" {r['currency'] or 'USD'}",
+           f"  structure  {r['consideration'] or '—'}",
+           f"  multiple   {r['implied_multiple'] or 'none disclosed'}"]
+    if r["flagged_advisor"]:
+        out.append(f"  FLAGGED    {r['flagged_advisor']} is advising")
+    for label, key in (("rationale", "rationale"), ("financing", "financing")):
+        if r[key]:
+            out.append(f"  {label:<10} {r[key]}")
+    if r["advisors"]:
+        out.append("  advisors   " + ", ".join(
+            f"{a['name']} ({a.get('side', '?')})" for a in r["advisors"]))
+    if r["open_questions"]:
+        out.append("  open questions:")
+        out += [f"    - {q}" for q in r["open_questions"]]
+    out.append(f"  source     {r['url']}")
+    out.append("")
+    out.append("  YOUR VIEW: " + (r["my_view"] or
+                                  "(none yet — agents deals --note %d \"...\")" % r["id"]))
+    return "\n".join(out)
+
+
 def _doctor(cfg) -> int:
     from .agents.backtest import docker_available
     from .netcache import Fetcher
@@ -179,6 +312,10 @@ def _doctor(cfg) -> int:
     f = Fetcher(cfg.cache_dir, user_agent=cfg.sec_user_agent)
     probe = f.fetch("https://www.sec.gov/files/company_tickers.json", ttl=86_400)
     print(f"SEC EDGAR      {'reachable' if probe and probe.ok else 'UNREACHABLE'}")
+    from .dealstore import health  # noqa: PLC0415
+    print(f"deal book      {health(cfg.dealbook_dsn)}")
+    print(f"phone push     {'ntfy topic set' if cfg.has_push else 'NOT CONFIGURED'} "
+          f"({cfg.ntfy_server})")
     for d in cfg.degradations():
         print(f"  ! {d}")
     return 0

@@ -1,0 +1,16 @@
+[Unit]
+Description=agents_work M&A deal book sweep
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nbaillar
+Group=nbaillar
+WorkingDirectory=/home/nbaillar/agents_work
+ExecStart=/home/nbaillar/agents_work/.venv/bin/agents deals
+# A sweep that finds nothing is a normal morning, and a dead feed is already
+# recorded in the run log and shown on the dashboard.
+SuccessExitStatus=0 1
+TimeoutStartSec=900
+NoNewPrivileges=yes

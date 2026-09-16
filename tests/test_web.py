@@ -16,11 +16,20 @@ def client(cfg, offline_ctx):
 
 
 def test_dashboard_lists_every_agent(client):
+    """Every registered agent reaches the index.
+
+    Titles come from the registry rather than a literal list: hardcoding them
+    meant renaming one agent broke this test for a reason that had nothing to
+    do with what it checks, and adding one left it silently not checking the
+    new agent at all.
+    """
+    from agents_work.web.app import AGENTS
+
     body = client.get("/").text
     assert client.get("/").status_code == 200
-    for title in ("Portfolio research", "Backtest runner", "Market open briefing",
-                  "Internship scout", "Personal RAG analyst"):
-        assert title in body
+    assert len(AGENTS) >= 7
+    for title, _blurb in AGENTS.values():
+        assert title in body, f"{title} missing from the dashboard index"
 
 
 def test_dashboard_shows_the_last_run_and_its_degradations(client):
@@ -73,7 +82,7 @@ def test_health_reports_capabilities(client):
     payload = client.get("/api/health").json()
     assert payload["ok"] is True
     assert set(payload["capabilities"]) >= {"llm", "price_lake", "sandbox_image"}
-    assert set(payload["agents"]) == {"research", "backtest", "briefing", "scout", "analyst"}
+    assert set(payload["agents"]) == {"research", "backtest", "briefing", "scout", "analyst", "comps", "dealbook"}
     assert payload["agents"]["briefing"]["artifacts"] >= 1
 
 

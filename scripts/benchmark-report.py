@@ -18,13 +18,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # \d{1,2}, not \d: gate S10 was invisible to this script for one commit,
 # which is precisely the "documented but unchecked" failure it exists to catch.
-GATE = re.compile(r"^\|\s*([XRBMSAP]\d{1,2})\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$")
+GATE = re.compile(r"^\|\s*([XRBMSAPCDV]\d{1,2})\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$")
 SECTION = re.compile(r"^##\s+(.*)$")
-IN_DOC = re.compile(r"\b([XRBMSAP]\d{1,2})\b")
+IN_DOC = re.compile(r"\b([XRBMSAPCDV]\d{1,2})\b")
 
 
 def gates() -> dict[str, tuple[str, str, str]]:
-    """id -> (section, gate, threshold), in file order."""
+    """id -> (section, gate, threshold), in file order.
+
+    A duplicate id is fatal rather than last-one-wins. Two gates sharing an id
+    defeat this script's whole purpose: both halves of the cross-reference
+    match, so the counts balance and the report is green while one of the two
+    gates has no test behind it at all. A new section of enterprise-value gates
+    was numbered R6-R10 straight over the research agent's existing R6-R9 and
+    the report did not notice.
+    """
     out, section = {}, "Cross-cutting"
     for line in (ROOT / "BENCHMARKS.md").read_text().splitlines():
         header = SECTION.match(line)
@@ -33,7 +41,14 @@ def gates() -> dict[str, tuple[str, str, str]]:
             continue
         hit = GATE.match(line)
         if hit:
-            out[hit.group(1)] = (section, hit.group(2), hit.group(3))
+            gate_id = hit.group(1)
+            if gate_id in out:
+                raise SystemExit(
+                    f"BENCHMARKS.md defines gate {gate_id} twice: "
+                    f"'{out[gate_id][0]}' and '{section}'. Gate ids must be unique — "
+                    "a duplicate makes this cross-reference pass while one of them "
+                    "is unenforced.")
+            out[gate_id] = (section, hit.group(2), hit.group(3))
     return out
 
 

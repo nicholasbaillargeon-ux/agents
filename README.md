@@ -1,28 +1,70 @@
 # agents_work
 
-Five agents that do research work on a schedule, share one run log, and are
+Seven agents that do research work on a schedule, share one run log, and are
 honest about what they could not reach.
 
 | Agent | What it does | How it runs |
 |---|---|---|
 | `research` | Ticker or watchlist in; a one-page brief (thesis, risks, valuation context) out, committed to a git repo of research notes | on demand |
 | `backtest` | A strategy idea in plain English → generated code → a sandboxed run → Sharpe, max drawdown, equity curve | on demand |
-| `briefing` | Futures, macro, watchlist movers and today's earnings, before the bell | systemd timer, 08:00 Mon–Fri |
-| `scout` | 84 quant, bank, broker, exchange, fintech, AI and enterprise-IT boards swept nightly; only what is new since the last run, with how long each has been open | systemd timer, 03:30 nightly |
-| `analyst` | Questions answered over your notes *and* the briefs the other four wrote, with citations | on demand |
+| `briefing` | The morning tape: the Treasury curve and the day's move in basis points, what fed funds futures price for the next three FOMC meetings, overnight M&A, futures, movers and today's earnings — plus one talking point, pushed to a phone | systemd timer, 06:30 Mon–Fri |
+| `scout` | 84 quant, bank, broker, exchange, fintech, AI and enterprise-IT boards swept nightly; only what is new since the last run, with how long each has been open | systemd timer, every 3h at :30 |
+| `comps` | A peer set in; a comparable-companies table out — market cap, an enterprise value bridged through debt, cash, preferred and minorities, and the multiples that follow, every cell traced to a filed XBRL fact | on demand, plus a weekly set |
+| `dealbook` | M&A feeds watched for your filters (size, sector, or an advisor you are watching); a structured one-pager drafted into Postgres for each match, for you to annotate | systemd timer, 07:15 and 17:15 Mon–Fri |
+| `analyst` | Questions answered over your notes *and* the briefs the other six wrote, with citations | on demand |
 
 ```bash
 agents doctor                              # what works right now
 agents research NVDA AAPL
 agents backtest "buy when 20d crosses above 50d, flat otherwise" --symbols SPY,QQQ
-agents briefing
+agents briefing                            # the morning tape
+agents comps --set advisory                # or: agents comps --peers "mid-cap asset managers"
+agents comps --list-sets
+agents deals                               # sweep the M&A feeds
+agents deals --list                        # the book; ! = watched advisor, * = you have a view
+agents deals --show 7
+agents deals --note 7 "Multiple looks full versus the 2024 comp."
 agents scout
 agents ask "what did I conclude about NVDA last month"
 agents status                              # recent runs
 ```
 
 Dashboard: **http://192.168.1.149:8110** — read-only, one card per agent, the
-run log, and the notes-repo commit history.
+run log, and the notes-repo commit history. The deal book is at
+**/deals**, rendered from Postgres with your annotations.
+
+## The three newest, and what is actually hard about them
+
+**The morning tape** is a section of the briefing rather than an agent of its
+own, because the briefing already owns 06:30: a second agent covering the same
+minute would duplicate the timer, the dashboard row and the notes commit, and
+hand you two documents to read instead of one.
+
+Its two non-obvious choices are both about not hardcoding a number that goes
+stale. Fed expectations come from the 30-day fed funds futures strip rather
+than a scraped FedWatch figure — ZQ settles to the month's average effective
+rate, so `100 − price` *is* the market's priced path, and the front contract
+doubles as a market-derived reading of where policy sits today, with no target
+range written down anywhere to go wrong after the next meeting. And the FOMC
+calendar is scraped from the Fed's own page, because a table of meeting dates
+baked into source is correct for about a year and then silently points at the
+past.
+
+**The comps engine** is mostly a fight with XBRL. EDGAR is the best free
+financial source there is and it is only nominally standardised: filers migrate
+between tags and EDGAR serves the abandoned one forever, banks report no
+operating income line, Microsoft splits depreciation from amortisation and tags
+no combined figure, Meta files its share count per class. So every lookup is
+ranked by *which tag yields a current figure*, alternatives are never summed
+(adding `LongTermDebt` to `LongTermDebtCurrent` double-counts the maturity
+wall), and a peer whose filings do not support a multiple gets an empty cell
+and a footnote. One invented cell in a comps table is invisible and moves the
+median everyone reads off it.
+
+**The deal book** draws the line at the annotation. A sweep refreshes what the
+agent knows about a deal and never writes `my_view`, `status` or `reviewed_at`
+— a library of fifteen deals you have formed a view on is the product, and a
+library of fifteen deals a model summarised is not.
 
 ## The idea
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly comps table for one peer set
+# Saturday morning, when EDGAR is quiet and nothing else here is running. Once
+# a week because a comps table moves with prices daily but with *filings*
+# quarterly, and the filings are the part this engine adds. A weekly cadence
+# builds a readable series of where a sector's multiples sat, week by week,
+# in the notes repo.
+
+[Timer]
+OnCalendar=Sat 09:00
+Persistent=true
+AccuracySec=10min
+
+[Install]
+WantedBy=timers.target

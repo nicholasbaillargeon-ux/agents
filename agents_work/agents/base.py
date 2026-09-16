@@ -13,6 +13,7 @@ from ..config import Config, load_config
 from ..gitsink import NotesRepo
 from ..llm import LLM
 from ..netcache import Fetcher
+from ..notify import Push
 from ..store import connect
 
 log = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class Context:
 
     def __init__(self, cfg: Config | None = None, *, llm: LLM | None = None,
                  fetcher: Fetcher | None = None, notes: NotesRepo | None = None,
-                 offline: bool = False) -> None:
+                 push: Push | None = None, offline: bool = False) -> None:
         self.cfg = cfg or load_config()
         self.cfg.ensure_dirs()
         self.offline = offline
@@ -52,6 +53,10 @@ class Context:
         )
         self.notes = notes if notes is not None else NotesRepo(
             self.cfg.notes_repo, remote=self.cfg.git_remote)
+        # Offline means "touch no network", and a push is a network call like
+        # any other — so an offline run writes the brief and sends nothing.
+        self.push = push if push is not None else Push(
+            self.cfg.ntfy_topic, server=self.cfg.ntfy_server, enabled=not offline)
         self._conn = None
 
     @property

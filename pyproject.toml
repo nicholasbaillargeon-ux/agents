@@ -1,7 +1,7 @@
 [project]
 name = "agents-work"
 version = "0.1.0"
-description = "Five research/ops agents: research briefs, backtests, market briefings, internship scouting, and a personal RAG analyst."
+description = "Seven research/ops agents: research briefs, backtests, the morning tape, internship scouting, a personal RAG analyst, an EDGAR comps engine and an M&A deal book."
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "anthropic>=0.40",
@@ -14,6 +14,9 @@ dependencies = [
     "pyarrow>=15",
     "yfinance>=0.2.40",
     "python-dateutil>=2.9",
+    # Postgres for the deal book only. Binary wheel so the deploy needs no
+    # libpq and no compiler; every other store in this repo is SQLite.
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]

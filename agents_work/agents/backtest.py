@@ -158,6 +158,17 @@ def run_in_docker(job: BacktestJob, lake: Path, *, timeout: int = 120) -> dict:
         (tmpd / "job").mkdir()
         (tmpd / "out").mkdir()
         (tmpd / "job" / "job.json").write_text(json.dumps(job.payload()))
+        # The container runs as uid 10001 (see sandbox/Dockerfile); this
+        # directory is created by tempfile as 0700 owned by the host user, and
+        # the file inside it lands at 0640 under the default umask. Neither is
+        # readable by the sandbox user, so the run failed inside the container
+        # with a permission error on /job/job.json that looked like a bug in
+        # the generated strategy. The bind mount makes the mount point itself
+        # reachable, so only the mounted directory and its contents need
+        # opening up — and both hold a generated job spec in a temp dir that is
+        # deleted when this block exits, never a credential.
+        os.chmod(tmpd / "job", 0o755)
+        os.chmod(tmpd / "job" / "job.json", 0o644)
         os.chmod(tmpd / "out", 0o777)
         cmd = [
             "docker", "run", "--rm",
