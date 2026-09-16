@@ -11,7 +11,7 @@ honest about what they could not reach.
 | `scout` | 84 quant, bank, broker, exchange, fintech, AI and enterprise-IT boards swept nightly; only what is new since the last run, with how long each has been open | systemd timer, every 3h at :30 |
 | `comps` | A peer set in; a comparable-companies table out — market cap, an enterprise value bridged through debt, cash, preferred and minorities, and the multiples that follow, every cell traced to a filed XBRL fact | on demand, plus a weekly set |
 | `dealbook` | M&A feeds watched for your filters (size, sector, or an advisor you are watching); a structured one-pager drafted into Postgres for each match, for you to annotate | systemd timer, 07:15 and 17:15 Mon–Fri |
-| `ainews` | Nine AI feeds — the labs' own blogs, the trade press and one news query — folded into one row per event, ordered by what it changes, with a model's line on why each matters, and the top three pushed to a phone | systemd timer, 07:00 daily |
+| `ainews` | Nine AI feeds — the labs' own blogs, the trade press and one news query — folded into one row per event, ordered by what it changes, with a model's line on why each matters, and the top three pushed to a phone | systemd timer, 06:50 daily |
 | `analyst` | Questions answered over your notes *and* the briefs the other seven wrote, with citations | on demand |
 
 ```bash

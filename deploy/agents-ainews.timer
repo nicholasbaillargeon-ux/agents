@@ -1,9 +1,14 @@
 [Unit]
-Description=Daily AI brief at 07:00
-# 07:00 America/New_York (the host's timezone), after the 06:30 tape has gone
-# to the phone and before the 07:15 deal book sweep. The tape is the thirty
-# seconds before the bell; this is the longer read, so it gets its own slot
-# rather than another section of that page.
+Description=Daily AI brief at 06:50
+# 06:50 America/New_York (the host's timezone), twenty minutes after the 06:30
+# tape has gone to the phone. It was 07:00 for its first day and moved on
+# 2026-09-16: at 07:00 it landed fifteen minutes before the 07:15 deal book
+# sweep, and both push to the same ntfy topic. Two buzzes in a quarter of an
+# hour is how a topic gets muted, and the tape and the deal book are the two
+# that are actually time-critical.
+#
+# The tape is the thirty seconds before the bell; this is the longer read, so
+# it gets its own slot rather than another section of that page.
 #
 # Seven days a week, unlike the market timers. AI releases land on Saturdays,
 # the feeds do not observe the trading calendar, and Sunday morning is when a
@@ -14,8 +19,8 @@ Description=Daily AI brief at 07:00
 # costs a model call to re-write a lede over the same stories.
 
 [Timer]
-OnCalendar=*-*-* 07:00:00
-# A machine that was asleep at 07:00 still gets its brief on wake.
+OnCalendar=*-*-* 06:50:00
+# A machine that was asleep at 06:50 still gets its brief on wake.
 Persistent=true
 AccuracySec=1min
 RandomizedDelaySec=300
